@@ -1,0 +1,11 @@
+# Claude Code working notes — not part of the deliverable
+.claude/
+
+# Local environment
+.env
+
+# Go build output
+/bin/
+*.test
+*.out
+coverage.*
