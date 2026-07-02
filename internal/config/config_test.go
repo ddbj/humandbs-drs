@@ -4,8 +4,10 @@ import (
 	"errors"
 	"flag"
 	"io"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // env builds a getenv func backed by a fixed map so tests inject the
@@ -126,10 +128,19 @@ func TestDRSExplicitEmptyRequiredFlagFails(t *testing.T) {
 	}
 }
 
+// validIssuerEnv covers every required issuer field via the environment, so
+// tests tweak only what they exercise.
+func validIssuerEnv() map[string]string {
+	return map[string]string{
+		envIssuerPublicURL:  "https://issuer.example.org",
+		envIssuerOIDCIssuer: "https://keycloak.example.org/realms/humandbs",
+		envIssuerSigningKey: "/keys/signing.pem",
+		envIssuerGrantDB:    "/data/grants.db",
+	}
+}
+
 func TestIssuerDefaults(t *testing.T) {
-	cfg, err := loadIssuer(t, nil, map[string]string{
-		envIssuerPublicURL: "https://issuer.example.org",
-	})
+	cfg, err := loadIssuer(t, nil, validIssuerEnv())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -139,17 +150,53 @@ func TestIssuerDefaults(t *testing.T) {
 	if cfg.PublicURL != "https://issuer.example.org" {
 		t.Errorf("PublicURL = %q, want %q", cfg.PublicURL, "https://issuer.example.org")
 	}
+	if cfg.VisaTTL != time.Hour {
+		t.Errorf("VisaTTL = %s, want default 1h", cfg.VisaTTL)
+	}
+	if cfg.OIDCClientID != "" {
+		t.Errorf("OIDCClientID = %q, want empty (audience check off)", cfg.OIDCClientID)
+	}
+	if cfg.SeedPath != "" {
+		t.Errorf("SeedPath = %q, want empty", cfg.SeedPath)
+	}
 }
 
 func TestIssuerFlagOverridesEnv(t *testing.T) {
-	cfg, err := loadIssuer(t, []string{"-public-url", "https://flag.example.org"}, map[string]string{
-		envIssuerPublicURL: "https://env.example.org",
-	})
+	environ := validIssuerEnv()
+	environ[envIssuerVisaTTL] = "30m"
+	cfg, err := loadIssuer(t, []string{"-public-url", "https://flag.example.org", "-visa-ttl", "15m"}, environ)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if cfg.PublicURL != "https://flag.example.org" {
 		t.Errorf("PublicURL = %q, want flag value %q", cfg.PublicURL, "https://flag.example.org")
+	}
+	if cfg.VisaTTL != 15*time.Minute {
+		t.Errorf("VisaTTL = %s, want flag value 15m", cfg.VisaTTL)
+	}
+}
+
+func TestIssuerVisaTTLFromEnv(t *testing.T) {
+	environ := validIssuerEnv()
+	environ[envIssuerVisaTTL] = "30m"
+	cfg, err := loadIssuer(t, nil, environ)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.VisaTTL != 30*time.Minute {
+		t.Errorf("VisaTTL = %s, want env value 30m", cfg.VisaTTL)
+	}
+}
+
+func TestIssuerRejectsBadVisaTTL(t *testing.T) {
+	for _, ttl := range []string{"nonsense", "0s", "-5m"} {
+		t.Run(ttl, func(t *testing.T) {
+			environ := validIssuerEnv()
+			environ[envIssuerVisaTTL] = ttl
+			if _, err := loadIssuer(t, nil, environ); err == nil {
+				t.Fatalf("want error for visa-ttl %q, got nil", ttl)
+			}
+		})
 	}
 }
 
@@ -160,8 +207,9 @@ func TestIssuerMissingRequired(t *testing.T) {
 	if !errors.As(err, &missing) {
 		t.Fatalf("error = %v, want *MissingError", err)
 	}
-	if got := missing.Fields; len(got) != 1 || got[0] != "public-url" {
-		t.Errorf("missing fields = %v, want [public-url]", got)
+	want := []string{"public-url", "oidc-issuer", "signing-key", "grant-db"}
+	if got := missing.Fields; !slices.Equal(got, want) {
+		t.Errorf("missing fields = %v, want %v", got, want)
 	}
 }
 

@@ -6,7 +6,9 @@ package config
 
 import (
 	"flag"
+	"fmt"
 	"strings"
+	"time"
 )
 
 // DRSConfig holds the configuration for the DRS server.
@@ -25,17 +27,41 @@ type IssuerConfig struct {
 	// PublicURL is the issuer's public URL, used as the visa `iss` claim and
 	// as the base for the JWKS `jku`, per architecture.md § "Issuer 設計".
 	PublicURL string
+	// OIDCIssuer is the URL of the OIDC provider (Keycloak realm) whose access
+	// tokens the issuer accepts.
+	OIDCIssuer string
+	// OIDCClientID, when non-empty, must appear in the access token audience.
+	// Empty skips the audience check.
+	OIDCClientID string
+	// SigningKeyPath is the PEM file holding the visa signing key. A missing
+	// file is created with a fresh key on startup.
+	SigningKeyPath string
+	// GrantDBPath is the SQLite grant database path.
+	GrantDBPath string
+	// VisaTTL caps the lifetime of minted visas
+	// (architecture.md § "Issuer 設計").
+	VisaTTL time.Duration
+	// SeedPath, when non-empty, is a JSON grant file loaded into the grant DB
+	// at startup.
+	SeedPath string
 }
 
 const (
 	envDRSAddr       = "HUMANDBS_DRS_ADDR"
 	envDRSPublicHost = "HUMANDBS_DRS_PUBLIC_HOST"
 
-	envIssuerAddr      = "HUMANDBS_ISSUER_ADDR"
-	envIssuerPublicURL = "HUMANDBS_ISSUER_PUBLIC_URL"
+	envIssuerAddr         = "HUMANDBS_ISSUER_ADDR"
+	envIssuerPublicURL    = "HUMANDBS_ISSUER_PUBLIC_URL"
+	envIssuerOIDCIssuer   = "HUMANDBS_ISSUER_OIDC_ISSUER"
+	envIssuerOIDCClientID = "HUMANDBS_ISSUER_OIDC_CLIENT_ID"
+	envIssuerSigningKey   = "HUMANDBS_ISSUER_SIGNING_KEY"
+	envIssuerGrantDB      = "HUMANDBS_ISSUER_GRANT_DB"
+	envIssuerVisaTTL      = "HUMANDBS_ISSUER_VISA_TTL"
+	envIssuerSeed         = "HUMANDBS_ISSUER_SEED"
 
 	defaultDRSAddr    = ":28000"
 	defaultIssuerAddr = ":28001"
+	defaultVisaTTL    = "1h"
 )
 
 // MissingError reports required configuration fields that resolved to empty.
@@ -86,16 +112,28 @@ func (f *DRSFlags) Resolve(fs *flag.FlagSet, getenv func(string) string) (DRSCon
 
 // IssuerFlags binds Visa issuer configuration flags to a flag set.
 type IssuerFlags struct {
-	addr      *string
-	publicURL *string
+	addr         *string
+	publicURL    *string
+	oidcIssuer   *string
+	oidcClientID *string
+	signingKey   *string
+	grantDB      *string
+	visaTTL      *string
+	seed         *string
 }
 
 // RegisterIssuerFlags registers the issuer configuration flags on fs. The
 // caller parses fs, then calls Resolve to obtain the configuration.
 func RegisterIssuerFlags(fs *flag.FlagSet) *IssuerFlags {
 	return &IssuerFlags{
-		addr:      fs.String("addr", "", "listen address (default "+defaultIssuerAddr+")"),
-		publicURL: fs.String("public-url", "", "issuer public URL, used as visa iss and jku base (required)"),
+		addr:         fs.String("addr", "", "listen address (default "+defaultIssuerAddr+")"),
+		publicURL:    fs.String("public-url", "", "issuer public URL, used as visa iss and jku base (required)"),
+		oidcIssuer:   fs.String("oidc-issuer", "", "OIDC provider URL whose access tokens are accepted (required)"),
+		oidcClientID: fs.String("oidc-client-id", "", "required audience of access tokens (empty skips the check)"),
+		signingKey:   fs.String("signing-key", "", "PEM file of the visa signing key, created when absent (required)"),
+		grantDB:      fs.String("grant-db", "", "SQLite grant database path (required)"),
+		visaTTL:      fs.String("visa-ttl", "", "visa lifetime cap as a Go duration (default "+defaultVisaTTL+")"),
+		seed:         fs.String("seed", "", "JSON grant file loaded at startup (optional)"),
 	}
 }
 
@@ -103,8 +141,13 @@ func RegisterIssuerFlags(fs *flag.FlagSet) *IssuerFlags {
 func (f *IssuerFlags) Resolve(fs *flag.FlagSet, getenv func(string) string) (IssuerConfig, error) {
 	set := setFlags(fs)
 	cfg := IssuerConfig{
-		Addr:      resolve(set, "addr", *f.addr, getenv(envIssuerAddr), defaultIssuerAddr),
-		PublicURL: resolve(set, "public-url", *f.publicURL, getenv(envIssuerPublicURL), ""),
+		Addr:           resolve(set, "addr", *f.addr, getenv(envIssuerAddr), defaultIssuerAddr),
+		PublicURL:      resolve(set, "public-url", *f.publicURL, getenv(envIssuerPublicURL), ""),
+		OIDCIssuer:     resolve(set, "oidc-issuer", *f.oidcIssuer, getenv(envIssuerOIDCIssuer), ""),
+		OIDCClientID:   resolve(set, "oidc-client-id", *f.oidcClientID, getenv(envIssuerOIDCClientID), ""),
+		SigningKeyPath: resolve(set, "signing-key", *f.signingKey, getenv(envIssuerSigningKey), ""),
+		GrantDBPath:    resolve(set, "grant-db", *f.grantDB, getenv(envIssuerGrantDB), ""),
+		SeedPath:       resolve(set, "seed", *f.seed, getenv(envIssuerSeed), ""),
 	}
 
 	var missing []string
@@ -114,9 +157,28 @@ func (f *IssuerFlags) Resolve(fs *flag.FlagSet, getenv func(string) string) (Iss
 	if cfg.PublicURL == "" {
 		missing = append(missing, "public-url")
 	}
+	if cfg.OIDCIssuer == "" {
+		missing = append(missing, "oidc-issuer")
+	}
+	if cfg.SigningKeyPath == "" {
+		missing = append(missing, "signing-key")
+	}
+	if cfg.GrantDBPath == "" {
+		missing = append(missing, "grant-db")
+	}
 	if len(missing) > 0 {
 		return IssuerConfig{}, &MissingError{Fields: missing}
 	}
+
+	ttlValue := resolve(set, "visa-ttl", *f.visaTTL, getenv(envIssuerVisaTTL), defaultVisaTTL)
+	ttl, err := time.ParseDuration(ttlValue)
+	if err != nil {
+		return IssuerConfig{}, fmt.Errorf("invalid visa-ttl %q: %w", ttlValue, err)
+	}
+	if ttl <= 0 {
+		return IssuerConfig{}, fmt.Errorf("visa-ttl must be positive, got %s", ttl)
+	}
+	cfg.VisaTTL = ttl
 
 	return cfg, nil
 }

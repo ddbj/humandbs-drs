@@ -23,6 +23,12 @@ const claimVisa = "ga4gh_visa_v1"
 // tokenType is the recommended `typ` header value for Visa Document Tokens.
 const tokenType = "vnd.ga4gh.visa+jwt"
 
+// TypeControlledAccessGrants is the Visa Object `type` asserting that a DAC
+// granted the subject access to the dataset named by `value`
+// (ga4gh_passport_v1 § Visa Types). The issuer mints visas of this type and the
+// Clearinghouse requires it when authorizing controlled data.
+const TypeControlledAccessGrants = "ControlledAccessGrants"
+
 // Errors reported by signing and verification. Callers match these with
 // errors.Is to distinguish an untrusted algorithm or a malformed token from a
 // signature or key failure.
