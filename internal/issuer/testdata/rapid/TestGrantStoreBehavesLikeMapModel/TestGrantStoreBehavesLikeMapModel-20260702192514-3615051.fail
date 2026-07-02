@@ -1,0 +1,30 @@
+# 2026/07/02 19:25:14.945828 [TestGrantStoreBehavesLikeMapModel] [rapid] draw action: "put"
+# 2026/07/02 19:25:14.945854 [TestGrantStoreBehavesLikeMapModel] [rapid] draw put.subject: "alice"
+# 2026/07/02 19:25:14.945867 [TestGrantStoreBehavesLikeMapModel] [rapid] draw put.dataset: "https://ddbj.nig.ac.jp/search/entry/jga-dataset/JGAD1"
+# 2026/07/02 19:25:14.945876 [TestGrantStoreBehavesLikeMapModel] [rapid] draw put.dac: "https://dac.example.org/a"
+# 2026/07/02 19:25:14.945887 [TestGrantStoreBehavesLikeMapModel] [rapid] draw put.asserted: 1699000000
+# 2026/07/02 19:25:14.945894 [TestGrantStoreBehavesLikeMapModel] [rapid] draw put.hasExpires: true
+# 2026/07/02 19:25:14.945903 [TestGrantStoreBehavesLikeMapModel] [rapid] draw put.expires: 1700000000
+# 2026/07/02 19:25:14.945909 [TestGrantStoreBehavesLikeMapModel] [rapid] draw put.hasConditions: false
+# 2026/07/02 19:25:14.946348 [TestGrantStoreBehavesLikeMapModel] ActiveBySubject("alice"):
+# got  [{Subject:alice DatasetID:https://ddbj.nig.ac.jp/search/entry/jga-dataset/JGAD1 DACSource:https://dac.example.org/a Asserted:2023-11-03 08:26:40 +0000 UTC Expires:2023-11-14 22:13:20 +0000 UTC Conditions:[]}]
+# want []
+# 
+v0.4.8#17900973828719336172
+0x1084210842108
+0x38e38e38e38e4
+0x2
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x1
+0x0
+0x6b74f03291620
+0x5
+0x0

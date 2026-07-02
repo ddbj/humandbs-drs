@@ -1,0 +1,57 @@
+# 2026/07/02 19:24:35.076934 [TestActiveBySubjectMatchesModelFilter] [rapid] draw nowOffset: -1
+# 2026/07/02 19:24:35.093068 [TestActiveBySubjectMatchesModelFilter] [rapid] draw n: 2
+# 2026/07/02 19:24:35.093086 [TestActiveBySubjectMatchesModelFilter] [rapid] draw g0.subject: "alice"
+# 2026/07/02 19:24:35.093096 [TestActiveBySubjectMatchesModelFilter] [rapid] draw g0.dataset: "https://ddbj.nig.ac.jp/search/entry/jga-dataset/JGAD1"
+# 2026/07/02 19:24:35.093106 [TestActiveBySubjectMatchesModelFilter] [rapid] draw g0.dac: "https://dac.example.org/a"
+# 2026/07/02 19:24:35.093114 [TestActiveBySubjectMatchesModelFilter] [rapid] draw g0.asserted: 1699000000
+# 2026/07/02 19:24:35.093121 [TestActiveBySubjectMatchesModelFilter] [rapid] draw g0.hasExpires: false
+# 2026/07/02 19:24:35.093127 [TestActiveBySubjectMatchesModelFilter] [rapid] draw g0.hasConditions: true
+# 2026/07/02 19:24:35.093143 [TestActiveBySubjectMatchesModelFilter] [rapid] draw g0.condValue: "a"
+# 2026/07/02 19:24:35.093375 [TestActiveBySubjectMatchesModelFilter] [rapid] draw g1.subject: "alice"
+# 2026/07/02 19:24:35.093382 [TestActiveBySubjectMatchesModelFilter] [rapid] draw g1.dataset: "https://ddbj.nig.ac.jp/search/entry/jga-dataset/JGAD1"
+# 2026/07/02 19:24:35.093390 [TestActiveBySubjectMatchesModelFilter] [rapid] draw g1.dac: "https://dac.example.org/a"
+# 2026/07/02 19:24:35.093397 [TestActiveBySubjectMatchesModelFilter] [rapid] draw g1.asserted: 1699000000
+# 2026/07/02 19:24:35.093404 [TestActiveBySubjectMatchesModelFilter] [rapid] draw g1.hasExpires: true
+# 2026/07/02 19:24:35.093411 [TestActiveBySubjectMatchesModelFilter] [rapid] draw g1.expires: 1699999999
+# 2026/07/02 19:24:35.093433 [TestActiveBySubjectMatchesModelFilter] [rapid] draw g1.hasConditions: false
+# 2026/07/02 19:24:35.093868 [TestActiveBySubjectMatchesModelFilter] ActiveBySubject("alice") at 2023-11-14 22:13:19 +0000 UTC:
+# got  [{Subject:alice DatasetID:https://ddbj.nig.ac.jp/search/entry/jga-dataset/JGAD1 DACSource:https://dac.example.org/a Asserted:2023-11-03 08:26:40 +0000 UTC Expires:2023-11-14 22:13:19 +0000 UTC Conditions:[]}]
+# want []
+# 
+v0.4.8#13137128864427043991
+0x10000000000000
+0x0
+0x0
+0x0
+0x38e38e38e38e4
+0x2
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x1
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x1
+0x0
+0x6b74f03291620
+0x4
+0x0
