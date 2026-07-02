@@ -1,0 +1,52 @@
+name: humandbs-drs
+
+services:
+  drs:
+    build:
+      context: .
+      target: drs
+    environment:
+      HUMANDBS_DRS_ADDR: ":28000"
+      HUMANDBS_DRS_PUBLIC_HOST: "localhost:28000"
+    ports:
+      - "28000:28000"
+
+  issuer:
+    build:
+      context: .
+      target: issuer
+    environment:
+      HUMANDBS_ISSUER_ADDR: ":28001"
+      HUMANDBS_ISSUER_PUBLIC_URL: "http://localhost:28001"
+    ports:
+      - "28001:28001"
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26
+    command: ["start-dev", "--http-port=8180"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+    ports:
+      - "8180:8180"
+
+  seaweedfs:
+    image: chrislusf/seaweedfs:3.80
+    command:
+      - server
+      - -s3
+      - -s3.port=8333
+      - -master.port=9333
+      - -filer.port=8888
+      - -volume.port=8082
+      - -dir=/data
+    ports:
+      - "8333:8333"
+      - "9333:9333"
+      - "8888:8888"
+      - "8082:8082"
+    volumes:
+      - seaweedfs-data:/data
+
+volumes:
+  seaweedfs-data:
