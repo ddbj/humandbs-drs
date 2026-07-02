@@ -44,10 +44,24 @@ func loadIssuer(t *testing.T, args []string, environ map[string]string) (IssuerC
 	return inf.Resolve(fs, env(environ))
 }
 
+// validDRSEnv sets every required DRS field via the environment, so a test can
+// override just the field it exercises without tripping the missing-required
+// check.
+func validDRSEnv() map[string]string {
+	return map[string]string{
+		envDRSPublicHost:     "drs.example.org",
+		envDRSManifest:       "/tmp/manifest.json",
+		envDRSIndexDB:        "/tmp/index.db",
+		envDRSServiceID:      "jp.ac.nig.ddbj.humandbs-drs",
+		envDRSServiceName:    "HumanDBs DRS",
+		envDRSOrgName:        "DDBJ",
+		envDRSOrgURL:         "https://www.ddbj.nig.ac.jp/",
+		envDRSTrustedIssuers: "https://issuer.example.org",
+	}
+}
+
 func TestDRSDefaults(t *testing.T) {
-	cfg, err := loadDRS(t, nil, map[string]string{
-		envDRSPublicHost: "drs.example.org",
-	})
+	cfg, err := loadDRS(t, nil, validDRSEnv())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -57,13 +71,18 @@ func TestDRSDefaults(t *testing.T) {
 	if cfg.PublicHost != "drs.example.org" {
 		t.Errorf("PublicHost = %q, want %q", cfg.PublicHost, "drs.example.org")
 	}
+	if cfg.ServiceID != "jp.ac.nig.ddbj.humandbs-drs" {
+		t.Errorf("ServiceID = %q, want %q", cfg.ServiceID, "jp.ac.nig.ddbj.humandbs-drs")
+	}
+	if len(cfg.TrustedIssuers) != 1 || cfg.TrustedIssuers[0] != "https://issuer.example.org" {
+		t.Errorf("TrustedIssuers = %v, want [https://issuer.example.org]", cfg.TrustedIssuers)
+	}
 }
 
 func TestDRSEnvOverridesDefault(t *testing.T) {
-	cfg, err := loadDRS(t, nil, map[string]string{
-		envDRSAddr:       ":9000",
-		envDRSPublicHost: "drs.example.org",
-	})
+	environ := validDRSEnv()
+	environ[envDRSAddr] = ":9000"
+	cfg, err := loadDRS(t, nil, environ)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -73,10 +92,10 @@ func TestDRSEnvOverridesDefault(t *testing.T) {
 }
 
 func TestDRSFlagOverridesEnv(t *testing.T) {
-	cfg, err := loadDRS(t, []string{"-addr", ":7000", "-public-host", "flag.example.org"}, map[string]string{
-		envDRSAddr:       ":9000",
-		envDRSPublicHost: "env.example.org",
-	})
+	environ := validDRSEnv()
+	environ[envDRSAddr] = ":9000"
+	environ[envDRSPublicHost] = "env.example.org"
+	cfg, err := loadDRS(t, []string{"-addr", ":7000", "-public-host", "flag.example.org"}, environ)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -91,10 +110,9 @@ func TestDRSFlagOverridesEnv(t *testing.T) {
 // An empty environment value must be treated as unset so the default wins,
 // rather than resolving the field to an empty string.
 func TestDRSEmptyEnvFallsBackToDefault(t *testing.T) {
-	cfg, err := loadDRS(t, nil, map[string]string{
-		envDRSAddr:       "",
-		envDRSPublicHost: "drs.example.org",
-	})
+	environ := validDRSEnv()
+	environ[envDRSAddr] = ""
+	cfg, err := loadDRS(t, nil, environ)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -106,25 +124,70 @@ func TestDRSEmptyEnvFallsBackToDefault(t *testing.T) {
 func TestDRSMissingRequired(t *testing.T) {
 	_, err := loadDRS(t, nil, nil)
 	if err == nil {
-		t.Fatal("expected error for missing public-host, got nil")
+		t.Fatal("expected error for missing required fields, got nil")
 	}
 
 	var missing *MissingError
 	if !errors.As(err, &missing) {
 		t.Fatalf("error = %v, want *MissingError", err)
 	}
-	if got := missing.Fields; len(got) != 1 || got[0] != "public-host" {
-		t.Errorf("missing fields = %v, want [public-host]", got)
+	got := strings.Join(missing.Fields, ",")
+	want := "public-host,manifest,index-db,service-id,service-name,org-name,org-url,trusted-issuer"
+	if got != want {
+		t.Errorf("missing fields = %q, want %q", got, want)
 	}
 }
 
-// An explicitly empty required flag must fail, not silently pass.
+// An explicitly empty required flag must fail even when the environment would
+// otherwise supply the value.
 func TestDRSExplicitEmptyRequiredFlagFails(t *testing.T) {
-	_, err := loadDRS(t, []string{"-public-host", ""}, nil)
+	_, err := loadDRS(t, []string{"-public-host", ""}, validDRSEnv())
 
 	var missing *MissingError
 	if !errors.As(err, &missing) {
 		t.Fatalf("error = %v, want *MissingError", err)
+	}
+}
+
+// A comma-separated trusted-issuer resolves to a trimmed, non-empty list.
+func TestDRSTrustedIssuersSplit(t *testing.T) {
+	environ := validDRSEnv()
+	environ[envDRSTrustedIssuers] = "https://a.example.org, https://b.example.org ,,https://c.example.org"
+	cfg, err := loadDRS(t, nil, environ)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := strings.Join(cfg.TrustedIssuers, "|")
+	want := "https://a.example.org|https://b.example.org|https://c.example.org"
+	if got != want {
+		t.Errorf("TrustedIssuers = %q, want %q", got, want)
+	}
+}
+
+// A trusted-issuer of only separators and blanks resolves to no issuers and is
+// reported as missing.
+func TestDRSBlankTrustedIssuerIsMissing(t *testing.T) {
+	environ := validDRSEnv()
+	environ[envDRSTrustedIssuers] = " , ,"
+	_, err := loadDRS(t, nil, environ)
+	var missing *MissingError
+	if !errors.As(err, &missing) {
+		t.Fatalf("error = %v, want *MissingError", err)
+	}
+	if len(missing.Fields) != 1 || missing.Fields[0] != "trusted-issuer" {
+		t.Errorf("missing fields = %v, want [trusted-issuer]", missing.Fields)
+	}
+}
+
+func TestDRSServiceIDFlagOverridesEnv(t *testing.T) {
+	environ := validDRSEnv()
+	environ[envDRSServiceID] = "env.id"
+	cfg, err := loadDRS(t, []string{"-service-id", "flag.id"}, environ)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.ServiceID != "flag.id" {
+		t.Errorf("ServiceID = %q, want %q", cfg.ServiceID, "flag.id")
 	}
 }
 

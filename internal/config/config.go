@@ -18,6 +18,23 @@ type DRSConfig struct {
 	// PublicHost is the host used to build DRS URIs (drs://<PublicHost>/<id>),
 	// as required by architecture.md § "object ID scheme".
 	PublicHost string
+	// ManifestPath is the JSON manifest mapping filesystem roots to dataset
+	// resource URLs (architecture.md § "storage backend と暗号化").
+	ManifestPath string
+	// IndexDBPath is the SQLite derived-index path, rebuilt from storage at
+	// startup (architecture.md § "index").
+	IndexDBPath string
+	// ServiceID is the service-info id, e.g. "jp.ac.nig.ddbj.humandbs-drs".
+	ServiceID string
+	// ServiceName is the human-readable service-info name.
+	ServiceName string
+	// OrgName is the service-info organization name.
+	OrgName string
+	// OrgURL is the service-info organization URL.
+	OrgURL string
+	// TrustedIssuers are the visa issuers advertised as passport_auth_issuers
+	// in the OPTIONS Authorizations (architecture.md § "Clearinghouse 設計").
+	TrustedIssuers []string
 }
 
 // IssuerConfig holds the configuration for the Visa issuer.
@@ -47,8 +64,15 @@ type IssuerConfig struct {
 }
 
 const (
-	envDRSAddr       = "HUMANDBS_DRS_ADDR"
-	envDRSPublicHost = "HUMANDBS_DRS_PUBLIC_HOST"
+	envDRSAddr           = "HUMANDBS_DRS_ADDR"
+	envDRSPublicHost     = "HUMANDBS_DRS_PUBLIC_HOST"
+	envDRSManifest       = "HUMANDBS_DRS_MANIFEST"
+	envDRSIndexDB        = "HUMANDBS_DRS_INDEX_DB"
+	envDRSServiceID      = "HUMANDBS_DRS_SERVICE_ID"
+	envDRSServiceName    = "HUMANDBS_DRS_SERVICE_NAME"
+	envDRSOrgName        = "HUMANDBS_DRS_ORG_NAME"
+	envDRSOrgURL         = "HUMANDBS_DRS_ORG_URL"
+	envDRSTrustedIssuers = "HUMANDBS_DRS_TRUSTED_ISSUERS"
 
 	envIssuerAddr         = "HUMANDBS_ISSUER_ADDR"
 	envIssuerPublicURL    = "HUMANDBS_ISSUER_PUBLIC_URL"
@@ -75,16 +99,30 @@ func (e *MissingError) Error() string {
 
 // DRSFlags binds DRS configuration flags to a flag set.
 type DRSFlags struct {
-	addr       *string
-	publicHost *string
+	addr           *string
+	publicHost     *string
+	manifest       *string
+	indexDB        *string
+	serviceID      *string
+	serviceName    *string
+	orgName        *string
+	orgURL         *string
+	trustedIssuers *string
 }
 
 // RegisterDRSFlags registers the DRS configuration flags on fs. The caller
 // parses fs, then calls Resolve to obtain the configuration.
 func RegisterDRSFlags(fs *flag.FlagSet) *DRSFlags {
 	return &DRSFlags{
-		addr:       fs.String("addr", "", "listen address (default "+defaultDRSAddr+")"),
-		publicHost: fs.String("public-host", "", "host for DRS URIs drs://<host>/<id> (required)"),
+		addr:           fs.String("addr", "", "listen address (default "+defaultDRSAddr+")"),
+		publicHost:     fs.String("public-host", "", "host for DRS URIs drs://<host>/<id> (required)"),
+		manifest:       fs.String("manifest", "", "JSON manifest of filesystem roots to dataset URLs (required)"),
+		indexDB:        fs.String("index-db", "", "SQLite derived-index path, rebuilt at startup (required)"),
+		serviceID:      fs.String("service-id", "", "service-info id, e.g. jp.ac.nig.ddbj.humandbs-drs (required)"),
+		serviceName:    fs.String("service-name", "", "service-info human-readable name (required)"),
+		orgName:        fs.String("org-name", "", "service-info organization name (required)"),
+		orgURL:         fs.String("org-url", "", "service-info organization URL (required)"),
+		trustedIssuers: fs.String("trusted-issuer", "", "comma-separated visa issuers advertised by OPTIONS (required)"),
 	}
 }
 
@@ -92,8 +130,15 @@ func RegisterDRSFlags(fs *flag.FlagSet) *DRSFlags {
 func (f *DRSFlags) Resolve(fs *flag.FlagSet, getenv func(string) string) (DRSConfig, error) {
 	set := setFlags(fs)
 	cfg := DRSConfig{
-		Addr:       resolve(set, "addr", *f.addr, getenv(envDRSAddr), defaultDRSAddr),
-		PublicHost: resolve(set, "public-host", *f.publicHost, getenv(envDRSPublicHost), ""),
+		Addr:           resolve(set, "addr", *f.addr, getenv(envDRSAddr), defaultDRSAddr),
+		PublicHost:     resolve(set, "public-host", *f.publicHost, getenv(envDRSPublicHost), ""),
+		ManifestPath:   resolve(set, "manifest", *f.manifest, getenv(envDRSManifest), ""),
+		IndexDBPath:    resolve(set, "index-db", *f.indexDB, getenv(envDRSIndexDB), ""),
+		ServiceID:      resolve(set, "service-id", *f.serviceID, getenv(envDRSServiceID), ""),
+		ServiceName:    resolve(set, "service-name", *f.serviceName, getenv(envDRSServiceName), ""),
+		OrgName:        resolve(set, "org-name", *f.orgName, getenv(envDRSOrgName), ""),
+		OrgURL:         resolve(set, "org-url", *f.orgURL, getenv(envDRSOrgURL), ""),
+		TrustedIssuers: splitList(resolve(set, "trusted-issuer", *f.trustedIssuers, getenv(envDRSTrustedIssuers), "")),
 	}
 
 	var missing []string
@@ -102,6 +147,27 @@ func (f *DRSFlags) Resolve(fs *flag.FlagSet, getenv func(string) string) (DRSCon
 	}
 	if cfg.PublicHost == "" {
 		missing = append(missing, "public-host")
+	}
+	if cfg.ManifestPath == "" {
+		missing = append(missing, "manifest")
+	}
+	if cfg.IndexDBPath == "" {
+		missing = append(missing, "index-db")
+	}
+	if cfg.ServiceID == "" {
+		missing = append(missing, "service-id")
+	}
+	if cfg.ServiceName == "" {
+		missing = append(missing, "service-name")
+	}
+	if cfg.OrgName == "" {
+		missing = append(missing, "org-name")
+	}
+	if cfg.OrgURL == "" {
+		missing = append(missing, "org-url")
+	}
+	if len(cfg.TrustedIssuers) == 0 {
+		missing = append(missing, "trusted-issuer")
 	}
 	if len(missing) > 0 {
 		return DRSConfig{}, &MissingError{Fields: missing}
@@ -181,6 +247,18 @@ func (f *IssuerFlags) Resolve(fs *flag.FlagSet, getenv func(string) string) (Iss
 	cfg.VisaTTL = ttl
 
 	return cfg, nil
+}
+
+// splitList parses a comma-separated value into trimmed, non-empty items.
+func splitList(v string) []string {
+	var items []string
+	for _, part := range strings.Split(v, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			items = append(items, trimmed)
+		}
+	}
+
+	return items
 }
 
 // setFlags returns the set of flag names that were explicitly provided.

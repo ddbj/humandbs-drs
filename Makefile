@@ -39,7 +39,15 @@ tidy:
 	go mod tidy
 
 run-drs: drs
-	./$(BIN)/drs -public-host localhost:28000
+	./$(BIN)/drs \
+		-public-host localhost:28000 \
+		-manifest manifest.json \
+		-index-db index.db \
+		-service-id jp.ac.nig.ddbj.humandbs-drs \
+		-service-name "HumanDBs DRS" \
+		-org-name DDBJ \
+		-org-url https://www.ddbj.nig.ac.jp/ \
+		-trusted-issuer http://localhost:28001
 
 run-issuer: issuer
 	./$(BIN)/issuer -public-url http://localhost:28001

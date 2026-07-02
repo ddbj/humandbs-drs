@@ -96,11 +96,14 @@ endpoint:
 DrsObject:
 
 - 必須フィールドは `id`, `self_uri`, `size`, `created_time`, `checksums`（最低 1 つ）。blob では `access_methods` を持つ。
+- `access_methods` は 1 object につき 1 つ。`type: "https"` と `access_id` を持ち、`access_url` は直接載せない。配信 URL は access endpoint（`/objects/{id}/access/{access_id}`）を経て取得し、未認可の client に配信先を露出させない。
 - `self_uri` は hostname-based で `drs://<host>/<id>`。
-- checksum は `sha-256` を取り込み時に計算し、index に保存する。
+- checksum は取り込み時に `sha-256` を計算して index に保存し、`{checksum: <hex>, type: "sha-256"}` の形で返す。
 - object ID の採番は下記「object ID scheme」に従う。
 - bundle（`contents`）は作らない。
 - cold storage は将来 `202 + Retry-After` と `access_method.available:false` で表現する余地を残す。
+- access endpoint は認可が成立した object にのみ AccessURL を返す。認可前は 401 で PassportAuth を要求する（認可判断は §4 Clearinghouse が担う）。
+- service-info の `id` / `name` / `organization`（`name`, `url`）は配備ごとの設定値で与える。`type` の group / artifact / version（`org.ga4gh` / `drs` / `1.5`）と service の `version`（build version）は server が固定的に供給する。bulk 非対応でも schema 準拠のため `maxBulkRequestLength` を出す。
 
 ### object ID scheme
 
@@ -190,4 +193,5 @@ EncryptionProvider（どう暗号化するか）:
 - storage（S3/FS）を SSOT とし、index は破棄して再構築できる。DRS ID は「object ID scheme」に従い、s3 は object metadata から、filesystem は相対 path から決定論的に復元する。
 - object の所属 dataset（dataset resource URL）は取り込み時に確定する。s3 モードは object metadata か key prefix 規約に、filesystem モードは manifest の `(root, dataset resource URL)` 対応に持たせる。この対応も storage 側の規約（と manifest）に載るため、index を再構築できる。
 - 更新: s3 モードは SeaweedFS filer の `SubscribeMetadata` gRPC change feed もしくは定期 scan。filesystem モードは dir scan。再構築は現在の tree に対する全置換で、追加・削除が反映され、同一 tree なら同一 rows に収束する。
+- DRS server は起動時に storage を full scan して index を全置換する。derived cache のため毎起動で再構築してよい。
 - エンジンは SQLite（単一ファイル。derived なので durability は要求しない）。
