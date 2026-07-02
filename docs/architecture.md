@@ -109,7 +109,7 @@ DRS URI は hostname-based（`drs://<host>/<id>`）とする。ID は opaque な
 ID の生成は取り込み時の scheme とし、storage backend ごとに異なる。いずれも一意かつ安定で、`self_uri` に載る canonical な ID を 1 つ持つ。
 
 - s3 モード: server が UUID を採番し、object metadata に焼く。index を破棄しても metadata から ID を復元できる。
-- filesystem モード（read-only）: file を書き換えられないため、dataset resource URL と相対 path を区切りを挟んで連結した文字列の hash を、unreserved 文字列に符号化した決定論的 ID とする。ディレクトリを再 scan するだけで同じ ID を復元でき、index を derived cache のまま保てる。
+- filesystem モード（read-only）: file を書き換えられないため、dataset resource URL と相対 path から決定論的に ID を導く。`id = base64url(sha-256(dataset resource URL + NUL + 相対 path))`（padding なしの URL-safe base64、`[A-Za-z0-9_-]` は unreserved の部分集合で `/` を含まない）。区切りの NUL は URL にも POSIX path にも現れないため、`(URL, 相対 path)` の連結は単射で、異なる組が同じ入力に潰れない。ディレクトリを再 scan するだけで同じ ID を復元でき、index を derived cache のまま保てる。
 
 1 つの object に複数の ID を割り当ててよい。将来 file に authoritative な accession が付与された場合は、それを alias として追加し、必要に応じて `self_uri` の canonical をその accession に昇格する。既存の `drs://` URI は引き続き解決可能に保つ。
 
@@ -172,7 +172,7 @@ controlled data の認可単位は dataset であり、安定した resource URL
 StorageBackend（どこに置くか）:
 
 - `s3`: SeaweedFS を建てて実データを載せる。upload も受けられる。
-- `filesystem`: 既存ディレクトリを移動せず read-only で DRS object 化する。ディレクトリを walk して各 file を object 化し、ID を採番して index に登録する。
+- `filesystem`: 既存ディレクトリを移動せず read-only で DRS object 化する。`(root directory, dataset resource URL)` の対応を manifest で与え、各 root subtree を 1 つの dataset として扱う。既存ディレクトリはその場で指すだけで、data tree には手を加えない。walk は regular file だけを object 化し、ID を採番して index に登録する。symlink（追うと tree 外へ脱出し得る）、dotfile / dot-directory（`.git` 等の system/VCS metadata）、その他の非 regular file は object 化しない。空 file（0 byte）は object として扱う。
 
 いずれのモードでも DRS API からは同一に見える。filesystem は presign できないため、配信は Go が stream で統一する。
 
@@ -186,8 +186,8 @@ EncryptionProvider（どう暗号化するか）:
 
 ## 9. index
 
-- 保持内容: `DRS ID` から、実データの所在（s3 key または FS path）、`size`、`sha-256`、所属 dataset、owner への対応。
+- 保持内容: `DRS ID` から、実データの所在（s3 key または FS path）、`size`、`sha-256`、所属 dataset（dataset resource URL）、`created_time` への対応。`created_time` は再 scan で復元できる storage 側の事実に取り、filesystem モードでは file の mtime を用いる。
 - storage（S3/FS）を SSOT とし、index は破棄して再構築できる。DRS ID は「object ID scheme」に従い、s3 は object metadata から、filesystem は相対 path から決定論的に復元する。
-- object の所属 dataset（dataset resource URL）は取り込み時に確定する。s3 モードは object metadata か key prefix 規約に、filesystem モードは dataset ごとに sub-tree を分ける等のディレクトリ規約に持たせる。この対応も storage 側の規約に載るため、index を再構築できる。
-- 更新: s3 モードは SeaweedFS filer の `SubscribeMetadata` gRPC change feed もしくは定期 scan。filesystem モードは dir scan。
+- object の所属 dataset（dataset resource URL）は取り込み時に確定する。s3 モードは object metadata か key prefix 規約に、filesystem モードは manifest の `(root, dataset resource URL)` 対応に持たせる。この対応も storage 側の規約（と manifest）に載るため、index を再構築できる。
+- 更新: s3 モードは SeaweedFS filer の `SubscribeMetadata` gRPC change feed もしくは定期 scan。filesystem モードは dir scan。再構築は現在の tree に対する全置換で、追加・削除が反映され、同一 tree なら同一 rows に収束する。
 - エンジンは SQLite（単一ファイル。derived なので durability は要求しない）。
