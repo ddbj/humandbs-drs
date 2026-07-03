@@ -23,6 +23,16 @@ type TrustedIssuer struct {
 	JWKSURL string
 }
 
+// DRSConfig.Encryption values: how stored bytes relate to the plaintext a
+// client downloads (architecture.md § "storage backend と暗号化").
+const (
+	// EncryptionNone stores objects in the clear.
+	EncryptionNone = "none"
+	// EncryptionAtRest stores objects as AES-256-GCM envelopes the server
+	// decrypts on delivery; it requires EncryptionKeyFile.
+	EncryptionAtRest = "at-rest"
+)
+
 // DRSConfig holds the configuration for the DRS server.
 type DRSConfig struct {
 	// Addr is the listen address, e.g. ":28000".
@@ -57,6 +67,13 @@ type DRSConfig struct {
 	// call. Empty disables revocation (the endpoint answers 503), so it is
 	// fail-closed (architecture.md § "配信設計").
 	AdminToken string
+	// Encryption selects the encryption provider: EncryptionNone or
+	// EncryptionAtRest.
+	Encryption string
+	// EncryptionKeyFile is the hex key file of the at-rest key. Required by
+	// EncryptionAtRest and rejected under EncryptionNone, so a configuration
+	// cannot silently serve ciphertext or ignore a key it was handed.
+	EncryptionKeyFile string
 }
 
 // IssuerConfig holds the configuration for the Visa issuer.
@@ -86,17 +103,19 @@ type IssuerConfig struct {
 }
 
 const (
-	envDRSAddr           = "HUMANDBS_DRS_ADDR"
-	envDRSPublicHost     = "HUMANDBS_DRS_PUBLIC_HOST"
-	envDRSManifest       = "HUMANDBS_DRS_MANIFEST"
-	envDRSIndexDB        = "HUMANDBS_DRS_INDEX_DB"
-	envDRSServiceID      = "HUMANDBS_DRS_SERVICE_ID"
-	envDRSServiceName    = "HUMANDBS_DRS_SERVICE_NAME"
-	envDRSOrgName        = "HUMANDBS_DRS_ORG_NAME"
-	envDRSOrgURL         = "HUMANDBS_DRS_ORG_URL"
-	envDRSTrustedIssuers = "HUMANDBS_DRS_TRUSTED_ISSUERS"
-	envDRSSessionTTL     = "HUMANDBS_DRS_SESSION_TTL"
-	envDRSAdminToken     = "HUMANDBS_DRS_ADMIN_TOKEN"
+	envDRSAddr              = "HUMANDBS_DRS_ADDR"
+	envDRSPublicHost        = "HUMANDBS_DRS_PUBLIC_HOST"
+	envDRSManifest          = "HUMANDBS_DRS_MANIFEST"
+	envDRSIndexDB           = "HUMANDBS_DRS_INDEX_DB"
+	envDRSServiceID         = "HUMANDBS_DRS_SERVICE_ID"
+	envDRSServiceName       = "HUMANDBS_DRS_SERVICE_NAME"
+	envDRSOrgName           = "HUMANDBS_DRS_ORG_NAME"
+	envDRSOrgURL            = "HUMANDBS_DRS_ORG_URL"
+	envDRSTrustedIssuers    = "HUMANDBS_DRS_TRUSTED_ISSUERS"
+	envDRSSessionTTL        = "HUMANDBS_DRS_SESSION_TTL"
+	envDRSAdminToken        = "HUMANDBS_DRS_ADMIN_TOKEN"
+	envDRSEncryption        = "HUMANDBS_DRS_ENCRYPTION"
+	envDRSEncryptionKeyFile = "HUMANDBS_DRS_ENCRYPTION_KEY_FILE"
 
 	envIssuerAddr         = "HUMANDBS_ISSUER_ADDR"
 	envIssuerPublicURL    = "HUMANDBS_ISSUER_PUBLIC_URL"
@@ -124,34 +143,38 @@ func (e *MissingError) Error() string {
 
 // DRSFlags binds DRS configuration flags to a flag set.
 type DRSFlags struct {
-	addr           *string
-	publicHost     *string
-	manifest       *string
-	indexDB        *string
-	serviceID      *string
-	serviceName    *string
-	orgName        *string
-	orgURL         *string
-	trustedIssuers *string
-	sessionTTL     *string
-	adminToken     *string
+	addr              *string
+	publicHost        *string
+	manifest          *string
+	indexDB           *string
+	serviceID         *string
+	serviceName       *string
+	orgName           *string
+	orgURL            *string
+	trustedIssuers    *string
+	sessionTTL        *string
+	adminToken        *string
+	encryption        *string
+	encryptionKeyFile *string
 }
 
 // RegisterDRSFlags registers the DRS configuration flags on fs. The caller
 // parses fs, then calls Resolve to obtain the configuration.
 func RegisterDRSFlags(fs *flag.FlagSet) *DRSFlags {
 	return &DRSFlags{
-		addr:           fs.String("addr", "", "listen address (default "+defaultDRSAddr+")"),
-		publicHost:     fs.String("public-host", "", "host for DRS URIs drs://<host>/<id> (required)"),
-		manifest:       fs.String("manifest", "", "JSON manifest of filesystem roots to dataset URLs (required)"),
-		indexDB:        fs.String("index-db", "", "SQLite derived-index path, rebuilt at startup (required)"),
-		serviceID:      fs.String("service-id", "", "service-info id, e.g. jp.ac.nig.ddbj.humandbs-drs (required)"),
-		serviceName:    fs.String("service-name", "", "service-info human-readable name (required)"),
-		orgName:        fs.String("org-name", "", "service-info organization name (required)"),
-		orgURL:         fs.String("org-url", "", "service-info organization URL (required)"),
-		trustedIssuers: fs.String("trusted-issuer", "", "comma-separated <issuer URL>=<JWKS URL> pairs of trusted visa issuers (required)"),
-		sessionTTL:     fs.String("session-ttl", "", "delivery session token lifetime as a Go duration (default "+defaultSessionTTL+")"),
-		adminToken:     fs.String("admin-token", "", "shared secret authenticating POST /admin/revoke; empty disables revocation (optional)"),
+		addr:              fs.String("addr", "", "listen address (default "+defaultDRSAddr+")"),
+		publicHost:        fs.String("public-host", "", "host for DRS URIs drs://<host>/<id> (required)"),
+		manifest:          fs.String("manifest", "", "JSON manifest of filesystem roots to dataset URLs (required)"),
+		indexDB:           fs.String("index-db", "", "SQLite derived-index path, rebuilt at startup (required)"),
+		serviceID:         fs.String("service-id", "", "service-info id, e.g. jp.ac.nig.ddbj.humandbs-drs (required)"),
+		serviceName:       fs.String("service-name", "", "service-info human-readable name (required)"),
+		orgName:           fs.String("org-name", "", "service-info organization name (required)"),
+		orgURL:            fs.String("org-url", "", "service-info organization URL (required)"),
+		trustedIssuers:    fs.String("trusted-issuer", "", "comma-separated <issuer URL>=<JWKS URL> pairs of trusted visa issuers (required)"),
+		sessionTTL:        fs.String("session-ttl", "", "delivery session token lifetime as a Go duration (default "+defaultSessionTTL+")"),
+		adminToken:        fs.String("admin-token", "", "shared secret authenticating POST /admin/revoke; empty disables revocation (optional)"),
+		encryption:        fs.String("encryption", "", "encryption provider, "+EncryptionNone+" or "+EncryptionAtRest+" (default "+EncryptionNone+")"),
+		encryptionKeyFile: fs.String("encryption-key-file", "", "hex file of the 32-byte at-rest key (required with -encryption "+EncryptionAtRest+")"),
 	}
 }
 
@@ -216,6 +239,23 @@ func (f *DRSFlags) Resolve(fs *flag.FlagSet, getenv func(string) string) (DRSCon
 		return DRSConfig{}, fmt.Errorf("session-ttl must be positive, got %s", ttl)
 	}
 	cfg.SessionTTL = ttl
+
+	enc := resolve(set, "encryption", *f.encryption, getenv(envDRSEncryption), EncryptionNone)
+	keyFile := resolve(set, "encryption-key-file", *f.encryptionKeyFile, getenv(envDRSEncryptionKeyFile), "")
+	switch enc {
+	case EncryptionNone:
+		if keyFile != "" {
+			return DRSConfig{}, fmt.Errorf("encryption-key-file is set but encryption is %q", EncryptionNone)
+		}
+	case EncryptionAtRest:
+		if keyFile == "" {
+			return DRSConfig{}, fmt.Errorf("encryption %q requires encryption-key-file", EncryptionAtRest)
+		}
+	default:
+		return DRSConfig{}, fmt.Errorf("invalid encryption %q: want %q or %q", enc, EncryptionNone, EncryptionAtRest)
+	}
+	cfg.Encryption = enc
+	cfg.EncryptionKeyFile = keyFile
 
 	return cfg, nil
 }

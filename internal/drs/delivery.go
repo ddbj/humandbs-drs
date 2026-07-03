@@ -57,7 +57,7 @@ func (h *handler) serveData(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = rsc.Close() }()
 
-	plain, size, err := h.enc.Reader(rsc, rec.Size)
+	plain, size, err := h.enc.Reader(rsc, rec.StoredSize)
 	if err != nil {
 		h.logger.Error("decrypt object", "object", rec.ID, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")

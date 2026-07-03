@@ -76,17 +76,22 @@ func run(args []string, getenv func(string) string, stdout io.Writer) error {
 		return err
 	}
 
+	provider, err := buildProvider(cfg)
+	if err != nil {
+		return err
+	}
+
 	idx, err := index.Open(cfg.IndexDBPath)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = idx.Close() }()
 
-	n, err := idx.Rebuild(ctx, backend)
+	n, err := idx.Rebuild(ctx, backend, provider)
 	if err != nil {
 		return err
 	}
-	logger.Info("index rebuilt", "objects", n)
+	logger.Info("index rebuilt", "objects", n, "encryption", cfg.Encryption)
 
 	ch, advertised, err := buildClearinghouse(ctx, cfg.TrustedIssuers, logger)
 	if err != nil {
@@ -97,7 +102,7 @@ func run(args []string, getenv func(string) string, stdout io.Writer) error {
 		return err
 	}
 
-	drsHandler := drs.NewHandler(idx, backend, ch, tokens, encryption.None{}, drs.Settings{
+	drsHandler := drs.NewHandler(idx, backend, ch, tokens, provider, drs.Settings{
 		PublicHost:     cfg.PublicHost,
 		ServiceID:      cfg.ServiceID,
 		ServiceName:    cfg.ServiceName,
@@ -143,6 +148,25 @@ func buildClearinghouse(ctx context.Context, issuers []config.TrustedIssuer, log
 	}
 
 	return ch, advertised, nil
+}
+
+// buildProvider constructs the encryption provider the configuration selects:
+// pass-through, or at-rest decryption under the key file's key
+// (architecture.md § "storage backend と暗号化").
+func buildProvider(cfg config.DRSConfig) (encryption.Provider, error) {
+	switch cfg.Encryption {
+	case config.EncryptionNone:
+		return encryption.None{}, nil
+	case config.EncryptionAtRest:
+		key, err := encryption.ReadKeyFile(cfg.EncryptionKeyFile)
+		if err != nil {
+			return nil, err
+		}
+
+		return encryption.NewAtRest(key, encryption.DefaultChunkSize)
+	default:
+		return nil, fmt.Errorf("unknown encryption %q", cfg.Encryption)
+	}
 }
 
 // loadManifest reads the dataset manifest from path.

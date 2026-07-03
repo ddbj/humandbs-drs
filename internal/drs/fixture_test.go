@@ -91,16 +91,25 @@ func testAuthority(t *testing.T) (*visa.Signer, *clearinghouse.Clearinghouse, *t
 	return signer, ch, tokens
 }
 
-// buildFixture writes files (relative path -> content) under one dataset root,
-// rebuilds the index, and serves the handler. Each opt mutates the Settings
-// before the handler is built, so a test can, e.g., disable the admin token. The
-// caller owns close.
+// buildFixture writes plaintext files (relative path -> content) under one
+// dataset root and serves them unencrypted. Each opt mutates the Settings
+// before the handler is built, so a test can, e.g., disable the admin token.
+// The caller owns close.
 func buildFixture(t *testing.T, files map[string]string, opts ...func(*drs.Settings)) *fixture {
 	t.Helper()
 	root := t.TempDir()
 	for rel, content := range files {
 		writeFile(t, filepath.Join(root, rel), content)
 	}
+
+	return serveFixture(t, root, encryption.None{}, opts...)
+}
+
+// serveFixture indexes the dataset root through enc, which must match how the
+// files under it are stored, and serves the handler over it. The caller owns
+// close.
+func serveFixture(t *testing.T, root string, enc encryption.Provider, opts ...func(*drs.Settings)) *fixture {
+	t.Helper()
 
 	backend, err := storage.NewFSBackend([]storage.Dataset{{Root: root, URL: datasetURL}})
 	if err != nil {
@@ -110,7 +119,7 @@ func buildFixture(t *testing.T, files map[string]string, opts ...func(*drs.Setti
 	if err != nil {
 		t.Fatalf("index.Open: %v", err)
 	}
-	if _, err := ix.Rebuild(context.Background(), backend); err != nil {
+	if _, err := ix.Rebuild(context.Background(), backend, enc); err != nil {
 		_ = ix.Close()
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -133,7 +142,7 @@ func buildFixture(t *testing.T, files map[string]string, opts ...func(*drs.Setti
 		opt(&settings)
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	srv := httptest.NewServer(drs.NewHandler(ix, backend, ch, tokens, encryption.None{}, settings, logger))
+	srv := httptest.NewServer(drs.NewHandler(ix, backend, ch, tokens, enc, settings, logger))
 
 	return &fixture{srv: srv, ix: ix, records: records, ids: ids, signer: signer, tokens: tokens}
 }

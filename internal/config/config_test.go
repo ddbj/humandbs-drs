@@ -377,3 +377,50 @@ func TestMissingErrorListsAllFields(t *testing.T) {
 		}
 	}
 }
+
+func TestDRSEncryptionDefaults(t *testing.T) {
+	cfg, err := loadDRS(t, nil, validDRSEnv())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Encryption != EncryptionNone {
+		t.Errorf("Encryption = %q, want default %q", cfg.Encryption, EncryptionNone)
+	}
+	if cfg.EncryptionKeyFile != "" {
+		t.Errorf("EncryptionKeyFile = %q, want empty", cfg.EncryptionKeyFile)
+	}
+}
+
+func TestDRSEncryptionAtRestResolve(t *testing.T) {
+	environ := validDRSEnv()
+	environ[envDRSEncryption] = "at-rest"
+	environ[envDRSEncryptionKeyFile] = "/env/key.hex"
+
+	cfg, err := loadDRS(t, nil, environ)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Encryption != EncryptionAtRest || cfg.EncryptionKeyFile != "/env/key.hex" {
+		t.Errorf("env resolve = (%q, %q), want (at-rest, /env/key.hex)", cfg.Encryption, cfg.EncryptionKeyFile)
+	}
+
+	cfg, err = loadDRS(t, []string{"-encryption-key-file", "/flag/key.hex"}, environ)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.EncryptionKeyFile != "/flag/key.hex" {
+		t.Errorf("EncryptionKeyFile = %q, want flag value /flag/key.hex", cfg.EncryptionKeyFile)
+	}
+}
+
+func TestDRSEncryptionInvalidCombinations(t *testing.T) {
+	for name, args := range map[string][]string{
+		"unknown mode":             {"-encryption", "aes"},
+		"at-rest without key file": {"-encryption", "at-rest"},
+		"none with key file":       {"-encryption-key-file", "/tmp/key.hex"},
+	} {
+		if _, err := loadDRS(t, args, validDRSEnv()); err == nil {
+			t.Errorf("%s: expected error, got none", name)
+		}
+	}
+}

@@ -98,7 +98,7 @@ DrsObject:
 - 必須フィールドは `id`, `self_uri`, `size`, `created_time`, `checksums`（最低 1 つ）。blob では `access_methods` を持つ。
 - `access_methods` は 1 object につき 1 つ。`type: "https"` と `access_id` を持ち、`access_url` は直接載せない。配信 URL は access endpoint（`/objects/{id}/access/{access_id}`）を経て取得し、未認可の client に配信先を露出させない。
 - `self_uri` は hostname-based で `drs://<host>/<id>`。
-- checksum は取り込み時に `sha-256` を計算して index に保存し、`{checksum: <hex>, type: "sha-256"}` の形で返す。
+- `size` と checksum は client が受け取る平文（EncryptionProvider が返す byte 列。§8）に対する値である。checksum は取り込み時に平文の `sha-256` を計算して index に保存し、`{checksum: <hex>, type: "sha-256"}` の形で返す。
 - object ID の採番は下記「object ID scheme」に従う。
 - bundle（`contents`）は作らない。
 - cold storage は将来 `202 + Retry-After` と `access_method.available:false` で表現する余地を残す。
@@ -217,7 +217,7 @@ controlled data の認可単位は dataset であり、安定した resource URL
   - 短い TTL（既定 5 分、設定値）による自然失効。TTL 内は再認可なしに配信を継続できる。
   - 明示 revoke。session store から該当 session を無効化し、進行中の download も次の request から拒否する。revoke の単位は `(subject, dataset)` で、DAC の grant 剥奪 1 件に対応する。subject だけを指定するとその利用者の全 session を止める。
 - 明示 revoke は DRS の `POST /admin/revoke`（body `{"subject": <subject>, "dataset": <dataset resource URL>}`、`dataset` 省略で subject 全体）で行い、無効化した session 数を返す。この endpoint は内部の control-plane であり、公開 gateway からは front しない。issuer / admin が内部網から共有 admin secret（`Authorization: Bearer <admin secret>`）で呼ぶ。admin secret 未設定時は revoke を提供しない（503、fail-closed）。
-- range request と条件付き request に対応する（RFC 7233 / 7232）。object の sha-256 を強 ETag、file mtime を Last-Modified として出し、`If-Range` は range を、`If-None-Match` / `If-Modified-Since` は条件付き GET（304 Not Modified）を制御する。書き込み向けの `If-Match` / `If-Unmodified-Since` は read-only な配信では扱わない。単一 range は 206 と `Content-Range` で返し、範囲外の range は 416（`Content-Range: bytes */size`）、複数 range・解釈不能な `Range` header は Range を無視して 200 全体を返す。`Accept-Ranges: bytes` を広告し、応答は `Content-Type: application/octet-stream`・`Content-Disposition: attachment`（不透明 blob のため file 名は付けない）とする。range request ごとに token 再検証が効くため、剥奪は次の range から反映される。
+- range request と条件付き request に対応する（RFC 7233 / 7232）。object の平文 sha-256 を強 ETag、file mtime を Last-Modified として出し、`If-Range` は range を、`If-None-Match` / `If-Modified-Since` は条件付き GET（304 Not Modified）を制御する。書き込み向けの `If-Match` / `If-Unmodified-Since` は read-only な配信では扱わない。単一 range は 206 と `Content-Range` で返し、範囲外の range は 416（`Content-Range: bytes */size`）、複数 range・解釈不能な `Range` header は Range を無視して 200 全体を返す。`Accept-Ranges: bytes` を広告し、応答は `Content-Type: application/octet-stream`・`Content-Disposition: attachment`（不透明 blob のため file 名は付けない）とする。range request ごとに token 再検証が効くため、剥奪は次の range から反映される。
 - 配信は byte 単位で audit する。配信 request ごとに object・subject・dataset・issuer・要求 range・送出 byte 数・結果を記録する（§5.1）。
 - byte を流すのは DRS プロセス自身である。配信性能が問題化した場合は水平スケールや前段 proxy の導入余地とする。
 
@@ -236,13 +236,17 @@ EncryptionProvider（どう暗号化するか）: 配信 handler は EncryptionP
 
 - `none`: 平文。
 - `at-rest`: 保管中は暗号化し、配信時に server が復号して byte を流す。鍵は server が管理する。
+  - 方式は chunk 化 AES-256-GCM（chunk は既定 64 KiB）。chunk 境界へ seek して該当 chunk だけを復号するため range 配信でき、読んだ chunk は必ず AEAD の完全性検証を通る。鍵不一致や ciphertext の改竄は復号エラーとして配信を止める。
+  - on-disk は envelope 形式: header（magic `HDRS`、version、chunk size、object ごとの乱数 nonce prefix）に chunk 列（各 chunk = 平文 chunk の GCM ciphertext + 認証 tag）が続く。chunk の nonce は `prefix ‖ chunk 番号 ‖ 最終 chunk flag` で構成し、chunk の並べ替え・切り詰め・伸長を検出する。header は各 chunk の additional data として認証され、header の改竄も検出する。空の object も空の最終 chunk 1 個を持つ。平文 size は格納 size と header から決定論的に導ける。
+  - 鍵は 32 byte の単一鍵を鍵 file（hex）で与える。rotation・KMS 連携は未確定（requirements § 未確定事項）。
+  - filesystem モードで at-rest を使う場合、root 配下の file は envelope 形式で置かれている前提である。平文 file からの変換には `cmd/drs-encrypt` を用いる。
 - `crypt4gh`（将来）: 暗号化ファイルをそのまま流し、client が自分の鍵で復号する。server も経路も平文を見ない。
 
 組み合わせ例: `(s3, at-rest)`, `(filesystem, none)`, `(filesystem, at-rest)`。将来 `(_, crypt4gh)`。
 
 ## 9. index
 
-- 保持内容: `DRS ID` から、実データの所在（s3 key または FS path）、`size`、`sha-256`、所属 dataset（dataset resource URL）、`created_time` への対応。`created_time` は再 scan で復元できる storage 側の事実に取り、filesystem モードでは file の mtime を用いる。
+- 保持内容: `DRS ID` から、実データの所在（s3 key または FS path）、`size`、`sha-256`、所属 dataset（dataset resource URL）、`created_time` への対応。`size` と `sha-256` は EncryptionProvider が返す平文に対して計算する（DrsObject と配信の ETag は client が受け取る平文を指す。§3・§7）。加えて格納 byte 数（stored size）を保持し、配信時に EncryptionProvider へ渡す。`created_time` は再 scan で復元できる storage 側の事実に取り、filesystem モードでは file の mtime を用いる。
 - storage（S3/FS）を SSOT とし、index は破棄して再構築できる。DRS ID は「object ID scheme」に従い、s3 は object metadata から、filesystem は相対 path から決定論的に復元する。
 - object の所属 dataset（dataset resource URL）は取り込み時に確定する。s3 モードは object metadata か key prefix 規約に、filesystem モードは manifest の `(root, dataset resource URL)` 対応に持たせる。この対応も storage 側の規約（と manifest）に載るため、index を再構築できる。
 - 更新: s3 モードは SeaweedFS filer の `SubscribeMetadata` gRPC change feed もしくは定期 scan。filesystem モードは dir scan。再構築は現在の tree に対する全置換で、追加・削除が反映され、同一 tree なら同一 rows に収束する。

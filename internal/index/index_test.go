@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/ddbj/humandbs-drs/internal/encryption"
 	"github.com/ddbj/humandbs-drs/internal/index"
 	"github.com/ddbj/humandbs-drs/internal/storage"
 )
@@ -67,7 +68,7 @@ func TestRebuildIndexesObjects(t *testing.T) {
 	ix := openIndex(t)
 	ctx := context.Background()
 
-	n, err := ix.Rebuild(ctx, b)
+	n, err := ix.Rebuild(ctx, b, encryption.None{})
 	if err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -97,6 +98,9 @@ func TestRebuildIndexesObjects(t *testing.T) {
 		}
 		if r.Size != int64(len(content)) {
 			t.Fatalf("object %q: size = %d, want %d", id, r.Size, len(content))
+		}
+		if r.StoredSize != r.Size {
+			t.Fatalf("object %q: stored size = %d, want %d (no encryption)", id, r.StoredSize, r.Size)
 		}
 		if r.SHA256 != sha256hex(content) {
 			t.Fatalf("object %q: sha256 = %q, want %q", id, r.SHA256, sha256hex(content))
@@ -136,7 +140,7 @@ func rebuildAndList(t *testing.T, b storage.Backend) []index.Record {
 	t.Helper()
 	ix := openIndex(t)
 	ctx := context.Background()
-	if _, err := ix.Rebuild(ctx, b); err != nil {
+	if _, err := ix.Rebuild(ctx, b, encryption.None{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	recs, err := ix.List(ctx)
@@ -155,12 +159,12 @@ func TestRebuildReconcilesAddsAndRemovals(t *testing.T) {
 	ix := openIndex(t)
 	ctx := context.Background()
 
-	if n, err := ix.Rebuild(ctx, b); err != nil || n != 2 {
+	if n, err := ix.Rebuild(ctx, b, encryption.None{}); err != nil || n != 2 {
 		t.Fatalf("initial Rebuild: n=%d err=%v, want n=2", n, err)
 	}
 
 	writeFile(t, filepath.Join(root, "added"), "a")
-	if n, err := ix.Rebuild(ctx, b); err != nil || n != 3 {
+	if n, err := ix.Rebuild(ctx, b, encryption.None{}); err != nil || n != 3 {
 		t.Fatalf("Rebuild after add: n=%d err=%v, want n=3", n, err)
 	}
 	if _, err := ix.Get(ctx, storage.ObjectID(urlA, "added")); err != nil {
@@ -170,7 +174,7 @@ func TestRebuildReconcilesAddsAndRemovals(t *testing.T) {
 	if err := os.Remove(filepath.Join(root, "gone")); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := ix.Rebuild(ctx, b); err != nil || n != 2 {
+	if n, err := ix.Rebuild(ctx, b, encryption.None{}); err != nil || n != 2 {
 		t.Fatalf("Rebuild after remove: n=%d err=%v, want n=2", n, err)
 	}
 	if _, err := ix.Get(ctx, storage.ObjectID(urlA, "gone")); !errors.Is(err, index.ErrObjectNotFound) {
@@ -196,7 +200,7 @@ func TestRebuildRejectsCollidingIDs(t *testing.T) {
 		storage.Dataset{Root: rootA, URL: urlA},
 		storage.Dataset{Root: rootB, URL: urlA},
 	)
-	if _, err := openIndex(t).Rebuild(context.Background(), b); err == nil {
+	if _, err := openIndex(t).Rebuild(context.Background(), b, encryption.None{}); err == nil {
 		t.Fatal("Rebuild with colliding ids: expected error")
 	}
 }
@@ -226,7 +230,7 @@ func TestManifestScanIndexRangeRead(t *testing.T) {
 
 	ix := openIndex(t)
 	ctx := context.Background()
-	if _, err := ix.Rebuild(ctx, b); err != nil {
+	if _, err := ix.Rebuild(ctx, b, encryption.None{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 
@@ -258,5 +262,73 @@ func TestManifestScanIndexRangeRead(t *testing.T) {
 	}
 	if buf.String() != "fox" {
 		t.Fatalf("suffix range = %q, want %q", buf.String(), "fox")
+	}
+}
+
+// TestRebuildRecordsPlaintextThroughProvider indexes an at-rest tree: size and
+// sha-256 must describe the plaintext a client receives, stored_size the
+// envelope on disk (architecture.md § "index").
+func TestRebuildRecordsPlaintextThroughProvider(t *testing.T) {
+	key := bytes.Repeat([]byte{9}, encryption.KeySize)
+	enc, err := encryption.NewAtRest(key, encryption.DefaultChunkSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const content = "controlled bytes"
+	var envelope bytes.Buffer
+	if err := enc.Encrypt(&envelope, bytes.NewReader([]byte(content))); err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "obj.enc"), envelope.String())
+
+	b := newBackend(t, storage.Dataset{Root: root, URL: urlA})
+	ix := openIndex(t)
+	ctx := context.Background()
+	if _, err := ix.Rebuild(ctx, b, enc); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+
+	r, err := ix.Get(ctx, storage.ObjectID(urlA, "obj.enc"))
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if r.Size != int64(len(content)) {
+		t.Fatalf("size = %d, want plaintext %d", r.Size, len(content))
+	}
+	if r.StoredSize != int64(envelope.Len()) {
+		t.Fatalf("stored size = %d, want envelope %d", r.StoredSize, envelope.Len())
+	}
+	if r.SHA256 != sha256hex(content) {
+		t.Fatalf("sha256 = %q, want plaintext %q", r.SHA256, sha256hex(content))
+	}
+}
+
+// TestRebuildRejectsUnreadableEnvelope stops a rebuild whose provider cannot
+// authenticate an object — a wrong key must fail loudly at startup, not index
+// garbage.
+func TestRebuildRejectsUnreadableEnvelope(t *testing.T) {
+	keyA := bytes.Repeat([]byte{1}, encryption.KeySize)
+	keyB := bytes.Repeat([]byte{2}, encryption.KeySize)
+	sealer, err := encryption.NewAtRest(keyA, encryption.DefaultChunkSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opener, err := encryption.NewAtRest(keyB, encryption.DefaultChunkSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var envelope bytes.Buffer
+	if err := sealer.Encrypt(&envelope, bytes.NewReader([]byte("payload"))); err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "obj.enc"), envelope.String())
+
+	b := newBackend(t, storage.Dataset{Root: root, URL: urlA})
+	if _, err := openIndex(t).Rebuild(context.Background(), b, opener); !errors.Is(err, encryption.ErrDecrypt) {
+		t.Fatalf("Rebuild with wrong key = %v, want ErrDecrypt", err)
 	}
 }
