@@ -424,3 +424,111 @@ func TestDRSEncryptionInvalidCombinations(t *testing.T) {
 		}
 	}
 }
+
+// validS3Env sets every required DRS field for the s3 backend: the s3
+// connection instead of the manifest.
+func validS3Env() map[string]string {
+	e := validDRSEnv()
+	delete(e, envDRSManifest)
+	e[envDRSStorageBackend] = StorageS3
+	e[envDRSS3Endpoint] = "http://seaweedfs:8333"
+	e[envDRSS3Bucket] = "humandbs"
+	e[envDRSS3AccessKey] = "access"
+	e[envDRSS3SecretKey] = "secret"
+
+	return e
+}
+
+func TestDRSStorageDefaultsToFilesystem(t *testing.T) {
+	cfg, err := loadDRS(t, nil, validDRSEnv())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.StorageBackend != StorageFilesystem {
+		t.Errorf("StorageBackend = %q, want default %q", cfg.StorageBackend, StorageFilesystem)
+	}
+	if cfg.ManifestPath != "/tmp/manifest.json" {
+		t.Errorf("ManifestPath = %q, want /tmp/manifest.json", cfg.ManifestPath)
+	}
+}
+
+func TestDRSStorageS3Resolve(t *testing.T) {
+	cfg, err := loadDRS(t, nil, validS3Env())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.StorageBackend != StorageS3 {
+		t.Errorf("StorageBackend = %q, want %q", cfg.StorageBackend, StorageS3)
+	}
+	if cfg.S3Endpoint != "http://seaweedfs:8333" || cfg.S3Bucket != "humandbs" {
+		t.Errorf("S3 endpoint/bucket = (%q, %q), want (http://seaweedfs:8333, humandbs)", cfg.S3Endpoint, cfg.S3Bucket)
+	}
+	if cfg.S3AccessKey != "access" || cfg.S3SecretKey != "secret" {
+		t.Errorf("S3 credentials = (%q, %q), want (access, secret)", cfg.S3AccessKey, cfg.S3SecretKey)
+	}
+	if cfg.S3Region != defaultS3Region {
+		t.Errorf("S3Region = %q, want default %q", cfg.S3Region, defaultS3Region)
+	}
+	if !cfg.S3ForcePathStyle {
+		t.Errorf("S3ForcePathStyle = false, want default true")
+	}
+	if cfg.ManifestPath != "" {
+		t.Errorf("ManifestPath = %q, want empty under s3", cfg.ManifestPath)
+	}
+}
+
+func TestDRSStorageS3MissingRequired(t *testing.T) {
+	for field, env := range map[string]string{
+		"s3-endpoint":   envDRSS3Endpoint,
+		"s3-bucket":     envDRSS3Bucket,
+		"s3-access-key": envDRSS3AccessKey,
+		"s3-secret-key": envDRSS3SecretKey,
+	} {
+		environ := validS3Env()
+		delete(environ, env)
+
+		_, err := loadDRS(t, nil, environ)
+		var missing *MissingError
+		if !errors.As(err, &missing) {
+			t.Fatalf("missing %s: error = %v, want *MissingError", field, err)
+		}
+		if !slices.Contains(missing.Fields, field) {
+			t.Errorf("missing %s: fields = %v, want it listed", field, missing.Fields)
+		}
+	}
+}
+
+func TestDRSStorageS3RejectsManifest(t *testing.T) {
+	environ := validS3Env()
+	environ[envDRSManifest] = "/tmp/manifest.json"
+
+	if _, err := loadDRS(t, nil, environ); err == nil {
+		t.Error("expected error when both s3 backend and manifest are set, got none")
+	}
+}
+
+func TestDRSStorageRejectsUnknownBackend(t *testing.T) {
+	environ := validDRSEnv()
+	environ[envDRSStorageBackend] = "gcs"
+
+	if _, err := loadDRS(t, nil, environ); err == nil {
+		t.Error("expected error for unknown storage backend, got none")
+	}
+}
+
+func TestDRSStorageS3ForcePathStyle(t *testing.T) {
+	environ := validS3Env()
+	environ[envDRSS3ForcePathStyle] = "false"
+	cfg, err := loadDRS(t, nil, environ)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.S3ForcePathStyle {
+		t.Error("S3ForcePathStyle = true, want false from env")
+	}
+
+	environ[envDRSS3ForcePathStyle] = "maybe"
+	if _, err := loadDRS(t, nil, environ); err == nil {
+		t.Error("expected error for non-boolean s3-force-path-style, got none")
+	}
+}

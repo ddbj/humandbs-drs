@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -33,6 +34,17 @@ const (
 	EncryptionAtRest = "at-rest"
 )
 
+// DRSConfig.StorageBackend values: where object bytes live
+// (architecture.md § "storage backend と暗号化").
+const (
+	// StorageFilesystem DRS-ifies existing directories read-only, configured by
+	// the manifest.
+	StorageFilesystem = "filesystem"
+	// StorageS3 stores objects in an S3 bucket (SeaweedFS) and can receive
+	// uploads, carrying each object's id and dataset in object metadata.
+	StorageS3 = "s3"
+)
+
 // DRSConfig holds the configuration for the DRS server.
 type DRSConfig struct {
 	// Addr is the listen address, e.g. ":28000".
@@ -40,9 +52,29 @@ type DRSConfig struct {
 	// PublicHost is the host used to build DRS URIs (drs://<PublicHost>/<id>),
 	// as required by architecture.md § "object ID scheme".
 	PublicHost string
+	// StorageBackend selects where object bytes live: StorageFilesystem or
+	// StorageS3 (architecture.md § "storage backend と暗号化").
+	StorageBackend string
 	// ManifestPath is the JSON manifest mapping filesystem roots to dataset
-	// resource URLs (architecture.md § "storage backend と暗号化").
+	// resource URLs. Required by StorageFilesystem, rejected under StorageS3
+	// (which carries the dataset in object metadata).
 	ManifestPath string
+	// S3Endpoint is the S3 (SeaweedFS) endpoint URL. Required by StorageS3.
+	S3Endpoint string
+	// S3Region is the S3 region sent with requests. SeaweedFS ignores it but the
+	// signer requires one.
+	S3Region string
+	// S3Bucket is the bucket holding the objects. Required by StorageS3.
+	S3Bucket string
+	// S3KeyPrefix scopes the backend to keys under it, so a shared bucket stays
+	// safe. Optional.
+	S3KeyPrefix string
+	// S3AccessKey and S3SecretKey are the static credentials used to sign S3
+	// requests. Required by StorageS3.
+	S3AccessKey string
+	S3SecretKey string
+	// S3ForcePathStyle selects path-style addressing, which SeaweedFS requires.
+	S3ForcePathStyle bool
 	// IndexDBPath is the SQLite derived-index path, rebuilt from storage at
 	// startup (architecture.md § "index").
 	IndexDBPath string
@@ -105,7 +137,15 @@ type IssuerConfig struct {
 const (
 	envDRSAddr              = "HUMANDBS_DRS_ADDR"
 	envDRSPublicHost        = "HUMANDBS_DRS_PUBLIC_HOST"
+	envDRSStorageBackend    = "HUMANDBS_DRS_STORAGE_BACKEND"
 	envDRSManifest          = "HUMANDBS_DRS_MANIFEST"
+	envDRSS3Endpoint        = "HUMANDBS_DRS_S3_ENDPOINT"
+	envDRSS3Region          = "HUMANDBS_DRS_S3_REGION"
+	envDRSS3Bucket          = "HUMANDBS_DRS_S3_BUCKET"
+	envDRSS3KeyPrefix       = "HUMANDBS_DRS_S3_KEY_PREFIX"
+	envDRSS3AccessKey       = "HUMANDBS_DRS_S3_ACCESS_KEY"
+	envDRSS3SecretKey       = "HUMANDBS_DRS_S3_SECRET_KEY"
+	envDRSS3ForcePathStyle  = "HUMANDBS_DRS_S3_FORCE_PATH_STYLE"
 	envDRSIndexDB           = "HUMANDBS_DRS_INDEX_DB"
 	envDRSServiceID         = "HUMANDBS_DRS_SERVICE_ID"
 	envDRSServiceName       = "HUMANDBS_DRS_SERVICE_NAME"
@@ -126,10 +166,13 @@ const (
 	envIssuerVisaTTL      = "HUMANDBS_ISSUER_VISA_TTL"
 	envIssuerSeed         = "HUMANDBS_ISSUER_SEED"
 
-	defaultDRSAddr    = ":28000"
-	defaultIssuerAddr = ":28001"
-	defaultVisaTTL    = "1h"
-	defaultSessionTTL = "5m"
+	defaultDRSAddr          = ":28000"
+	defaultIssuerAddr       = ":28001"
+	defaultVisaTTL          = "1h"
+	defaultSessionTTL       = "5m"
+	defaultStorageBackend   = StorageFilesystem
+	defaultS3Region         = "us-east-1"
+	defaultS3ForcePathStyle = "true"
 )
 
 // MissingError reports required configuration fields that resolved to empty.
@@ -145,7 +188,15 @@ func (e *MissingError) Error() string {
 type DRSFlags struct {
 	addr              *string
 	publicHost        *string
+	storageBackend    *string
 	manifest          *string
+	s3Endpoint        *string
+	s3Region          *string
+	s3Bucket          *string
+	s3KeyPrefix       *string
+	s3AccessKey       *string
+	s3SecretKey       *string
+	s3ForcePathStyle  *string
 	indexDB           *string
 	serviceID         *string
 	serviceName       *string
@@ -164,7 +215,15 @@ func RegisterDRSFlags(fs *flag.FlagSet) *DRSFlags {
 	return &DRSFlags{
 		addr:              fs.String("addr", "", "listen address (default "+defaultDRSAddr+")"),
 		publicHost:        fs.String("public-host", "", "host for DRS URIs drs://<host>/<id> (required)"),
-		manifest:          fs.String("manifest", "", "JSON manifest of filesystem roots to dataset URLs (required)"),
+		storageBackend:    fs.String("storage-backend", "", "storage backend, "+StorageFilesystem+" or "+StorageS3+" (default "+defaultStorageBackend+")"),
+		manifest:          fs.String("manifest", "", "JSON manifest of filesystem roots to dataset URLs (required with -storage-backend "+StorageFilesystem+")"),
+		s3Endpoint:        fs.String("s3-endpoint", "", "S3 (SeaweedFS) endpoint URL (required with -storage-backend "+StorageS3+")"),
+		s3Region:          fs.String("s3-region", "", "S3 region (default "+defaultS3Region+")"),
+		s3Bucket:          fs.String("s3-bucket", "", "S3 bucket holding the objects (required with -storage-backend "+StorageS3+")"),
+		s3KeyPrefix:       fs.String("s3-key-prefix", "", "S3 key prefix scoping the backend (optional)"),
+		s3AccessKey:       fs.String("s3-access-key", "", "S3 access key (required with -storage-backend "+StorageS3+")"),
+		s3SecretKey:       fs.String("s3-secret-key", "", "S3 secret key (required with -storage-backend "+StorageS3+")"),
+		s3ForcePathStyle:  fs.String("s3-force-path-style", "", "use path-style S3 addressing, required by SeaweedFS (default "+defaultS3ForcePathStyle+")"),
 		indexDB:           fs.String("index-db", "", "SQLite derived-index path, rebuilt at startup (required)"),
 		serviceID:         fs.String("service-id", "", "service-info id, e.g. jp.ac.nig.ddbj.humandbs-drs (required)"),
 		serviceName:       fs.String("service-name", "", "service-info human-readable name (required)"),
@@ -188,7 +247,14 @@ func (f *DRSFlags) Resolve(fs *flag.FlagSet, getenv func(string) string) (DRSCon
 	cfg := DRSConfig{
 		Addr:           resolve(set, "addr", *f.addr, getenv(envDRSAddr), defaultDRSAddr),
 		PublicHost:     resolve(set, "public-host", *f.publicHost, getenv(envDRSPublicHost), ""),
+		StorageBackend: resolve(set, "storage-backend", *f.storageBackend, getenv(envDRSStorageBackend), defaultStorageBackend),
 		ManifestPath:   resolve(set, "manifest", *f.manifest, getenv(envDRSManifest), ""),
+		S3Endpoint:     resolve(set, "s3-endpoint", *f.s3Endpoint, getenv(envDRSS3Endpoint), ""),
+		S3Region:       resolve(set, "s3-region", *f.s3Region, getenv(envDRSS3Region), defaultS3Region),
+		S3Bucket:       resolve(set, "s3-bucket", *f.s3Bucket, getenv(envDRSS3Bucket), ""),
+		S3KeyPrefix:    resolve(set, "s3-key-prefix", *f.s3KeyPrefix, getenv(envDRSS3KeyPrefix), ""),
+		S3AccessKey:    resolve(set, "s3-access-key", *f.s3AccessKey, getenv(envDRSS3AccessKey), ""),
+		S3SecretKey:    resolve(set, "s3-secret-key", *f.s3SecretKey, getenv(envDRSS3SecretKey), ""),
 		IndexDBPath:    resolve(set, "index-db", *f.indexDB, getenv(envDRSIndexDB), ""),
 		ServiceID:      resolve(set, "service-id", *f.serviceID, getenv(envDRSServiceID), ""),
 		ServiceName:    resolve(set, "service-name", *f.serviceName, getenv(envDRSServiceName), ""),
@@ -198,6 +264,13 @@ func (f *DRSFlags) Resolve(fs *flag.FlagSet, getenv func(string) string) (DRSCon
 		AdminToken:     resolve(set, "admin-token", *f.adminToken, getenv(envDRSAdminToken), ""),
 	}
 
+	forcePathStyle := resolve(set, "s3-force-path-style", *f.s3ForcePathStyle, getenv(envDRSS3ForcePathStyle), defaultS3ForcePathStyle)
+	fps, err := strconv.ParseBool(forcePathStyle)
+	if err != nil {
+		return DRSConfig{}, fmt.Errorf("invalid s3-force-path-style %q: %w", forcePathStyle, err)
+	}
+	cfg.S3ForcePathStyle = fps
+
 	var missing []string
 	if cfg.Addr == "" {
 		missing = append(missing, "addr")
@@ -205,8 +278,29 @@ func (f *DRSFlags) Resolve(fs *flag.FlagSet, getenv func(string) string) (DRSCon
 	if cfg.PublicHost == "" {
 		missing = append(missing, "public-host")
 	}
-	if cfg.ManifestPath == "" {
-		missing = append(missing, "manifest")
+	switch cfg.StorageBackend {
+	case StorageFilesystem:
+		if cfg.ManifestPath == "" {
+			missing = append(missing, "manifest")
+		}
+	case StorageS3:
+		if cfg.ManifestPath != "" {
+			return DRSConfig{}, fmt.Errorf("manifest is set but storage-backend is %q", StorageS3)
+		}
+		if cfg.S3Endpoint == "" {
+			missing = append(missing, "s3-endpoint")
+		}
+		if cfg.S3Bucket == "" {
+			missing = append(missing, "s3-bucket")
+		}
+		if cfg.S3AccessKey == "" {
+			missing = append(missing, "s3-access-key")
+		}
+		if cfg.S3SecretKey == "" {
+			missing = append(missing, "s3-secret-key")
+		}
+	default:
+		return DRSConfig{}, fmt.Errorf("invalid storage-backend %q: want %q or %q", cfg.StorageBackend, StorageFilesystem, StorageS3)
 	}
 	if cfg.IndexDBPath == "" {
 		missing = append(missing, "index-db")

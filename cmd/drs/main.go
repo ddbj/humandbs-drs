@@ -67,11 +67,7 @@ func run(args []string, getenv func(string) string, stdout io.Writer) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	datasets, err := loadManifest(cfg.ManifestPath)
-	if err != nil {
-		return err
-	}
-	backend, err := storage.NewFSBackend(datasets)
+	backend, err := buildBackend(cfg)
 	if err != nil {
 		return err
 	}
@@ -148,6 +144,34 @@ func buildClearinghouse(ctx context.Context, issuers []config.TrustedIssuer, log
 	}
 
 	return ch, advertised, nil
+}
+
+// buildBackend constructs the storage backend the configuration selects: the
+// filesystem backend over the manifest's roots, or the s3 backend over a bucket
+// (architecture.md § "storage backend と暗号化"). Both look identical to the
+// rest of the server.
+func buildBackend(cfg config.DRSConfig) (storage.Backend, error) {
+	switch cfg.StorageBackend {
+	case config.StorageFilesystem:
+		datasets, err := loadManifest(cfg.ManifestPath)
+		if err != nil {
+			return nil, err
+		}
+
+		return storage.NewFSBackend(datasets)
+	case config.StorageS3:
+		return storage.NewS3Backend(storage.S3Config{
+			Endpoint:       cfg.S3Endpoint,
+			Region:         cfg.S3Region,
+			Bucket:         cfg.S3Bucket,
+			KeyPrefix:      cfg.S3KeyPrefix,
+			AccessKey:      cfg.S3AccessKey,
+			SecretKey:      cfg.S3SecretKey,
+			ForcePathStyle: cfg.S3ForcePathStyle,
+		})
+	default:
+		return nil, fmt.Errorf("unknown storage backend %q", cfg.StorageBackend)
+	}
 }
 
 // buildProvider constructs the encryption provider the configuration selects:

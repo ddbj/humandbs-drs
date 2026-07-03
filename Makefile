@@ -11,7 +11,7 @@ LDFLAGS := -X $(MODULE)/internal/buildinfo.Version=$(VERSION) \
 
 BIN := bin
 
-.PHONY: all build drs issuer test vet lint fmt tidy run-drs run-issuer clean
+.PHONY: all build drs issuer test test-integration vet lint fmt tidy run-drs run-issuer clean
 
 all: build
 
@@ -25,6 +25,12 @@ issuer:
 
 test:
 	go test ./...
+
+# Runs the SeaweedFS-backed integration tests. Bring up the backend first
+# (docker compose up -d seaweedfs) and point the tests at it.
+test-integration: HUMANDBS_TEST_S3_ENDPOINT ?= http://localhost:8333
+test-integration:
+	HUMANDBS_TEST_S3_ENDPOINT=$(HUMANDBS_TEST_S3_ENDPOINT) go test -tags integration ./...
 
 vet:
 	go vet ./...
