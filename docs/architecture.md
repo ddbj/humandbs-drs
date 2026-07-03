@@ -210,13 +210,15 @@ controlled data の認可単位は dataset であり、安定した resource URL
 
 ## 7. 配信設計
 
-- controlled download は `GET /data/{object_id}` に `Authorization: Bearer <session token>` を付けて行う。認可成立時の AccessURL は `{url: "https://<host>/data/<object_id>", headers: ["Authorization: Bearer <session token>"]}` の形で返す。
-- session token は opaque な token（暗号論的乱数）とし、DRS が server-side の session store で保持する。token は発行時の object と subject に紐づき、別 object への流用はできない。
-- DRS は配信 request ごとに store を照合して token を検証し、storage backend から byte を stream する。EncryptionProvider が `at-rest` の場合は stream 途中で復号する。
+- controlled download は `GET /data/{object_id}`（`HEAD` も可）に `Authorization: Bearer <session token>` を付けて行う。認可成立時の AccessURL は `{url: "https://<host>/data/<object_id>", headers: ["Authorization: Bearer <session token>"]}` の形で返す。公開経路では `/data/` も service-gateway が humandbs-drs へ proxy する（§1 の `/ga4gh/` と同様）。
+- session token は opaque な token（暗号論的乱数）とし、DRS が server-side の session store で保持する。token は発行時の object・dataset・subject に紐づき、別 object への流用はできない。
+- DRS は配信 request ごとに store を照合して token を検証する。検証を通らない request は、token が無い・未知・失効なら 401（`WWW-Authenticate: Bearer`）で、他 object 宛の token なら 403 で拒否する。検証を通れば storage backend から byte を stream する。byte を平文へ変換するのは EncryptionProvider で、`none` は素通し、`at-rest` は stream 途中で復号する（§8）。配信 handler は range を EncryptionProvider が返す平文に対して適用するため、range と復号の対応は EncryptionProvider の内側で閉じる。
 - token の失効は 2 つの機構を持つ。
-  - 短い TTL（数分）による自然失効。TTL 内は再認可なしに配信を継続できる。
-  - admin/issuer からの明示 revoke。store から token を無効化し、進行中の download も次の request から拒否する。
-- range request ごとに再認可が効く。
+  - 短い TTL（既定 5 分、設定値）による自然失効。TTL 内は再認可なしに配信を継続できる。
+  - 明示 revoke。session store から該当 session を無効化し、進行中の download も次の request から拒否する。revoke の単位は `(subject, dataset)` で、DAC の grant 剥奪 1 件に対応する。subject だけを指定するとその利用者の全 session を止める。
+- 明示 revoke は DRS の `POST /admin/revoke`（body `{"subject": <subject>, "dataset": <dataset resource URL>}`、`dataset` 省略で subject 全体）で行い、無効化した session 数を返す。この endpoint は内部の control-plane であり、公開 gateway からは front しない。issuer / admin が内部網から共有 admin secret（`Authorization: Bearer <admin secret>`）で呼ぶ。admin secret 未設定時は revoke を提供しない（503、fail-closed）。
+- range request と条件付き request に対応する（RFC 7233 / 7232）。object の sha-256 を強 ETag、file mtime を Last-Modified として出し、`If-Range` は range を、`If-None-Match` / `If-Modified-Since` は条件付き GET（304 Not Modified）を制御する。書き込み向けの `If-Match` / `If-Unmodified-Since` は read-only な配信では扱わない。単一 range は 206 と `Content-Range` で返し、範囲外の range は 416（`Content-Range: bytes */size`）、複数 range・解釈不能な `Range` header は Range を無視して 200 全体を返す。`Accept-Ranges: bytes` を広告し、応答は `Content-Type: application/octet-stream`・`Content-Disposition: attachment`（不透明 blob のため file 名は付けない）とする。range request ごとに token 再検証が効くため、剥奪は次の range から反映される。
+- 配信は byte 単位で audit する。配信 request ごとに object・subject・dataset・issuer・要求 range・送出 byte 数・結果を記録する（§5.1）。
 - byte を流すのは DRS プロセス自身である。配信性能が問題化した場合は水平スケールや前段 proxy の導入余地とする。
 
 ## 8. storage backend と暗号化
@@ -230,7 +232,7 @@ StorageBackend（どこに置くか）:
 
 いずれのモードでも DRS API からは同一に見える。filesystem は presign できないため、配信は Go が stream で統一する。
 
-EncryptionProvider（どう暗号化するか）:
+EncryptionProvider（どう暗号化するか）: 配信 handler は EncryptionProvider から object の平文に対する reader を得て range を当てる。`none` は storage の reader を素通しし、`at-rest` は復号 reader を返す。range と復号の対応はこの内側で閉じる（§7）。
 
 - `none`: 平文。
 - `at-rest`: 保管中は暗号化し、配信時に server が復号して byte を流す。鍵は server が管理する。

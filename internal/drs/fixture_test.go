@@ -15,11 +15,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/ddbj/humandbs-drs/internal/clearinghouse"
 	"github.com/ddbj/humandbs-drs/internal/drs"
+	"github.com/ddbj/humandbs-drs/internal/encryption"
 	"github.com/ddbj/humandbs-drs/internal/index"
 	"github.com/ddbj/humandbs-drs/internal/storage"
 	"github.com/ddbj/humandbs-drs/internal/token"
@@ -27,10 +29,11 @@ import (
 )
 
 const (
-	datasetURL    = "https://ddbj.nig.ac.jp/search/entry/jga-dataset/JGAD000001"
-	testIssuerURL = "https://issuer.example.org"
-	testJWKSURL   = testIssuerURL + "/jwks"
-	testSubject   = "user-123"
+	datasetURL     = "https://ddbj.nig.ac.jp/search/entry/jga-dataset/JGAD000001"
+	testIssuerURL  = "https://issuer.example.org"
+	testJWKSURL    = testIssuerURL + "/jwks"
+	testSubject    = "user-123"
+	testAdminToken = "test-admin-secret"
 )
 
 // fixture is a running DRS handler backed by a real filesystem tree indexed into
@@ -42,6 +45,7 @@ type fixture struct {
 	records map[string]index.Record
 	ids     []string
 	signer  *visa.Signer
+	tokens  *token.Store
 }
 
 func testSettings() drs.Settings {
@@ -53,6 +57,7 @@ func testSettings() drs.Settings {
 		OrgURL:         "https://www.ddbj.nig.ac.jp/",
 		Version:        "test",
 		TrustedIssuers: []string{testIssuerURL},
+		AdminToken:     testAdminToken,
 	}
 }
 
@@ -87,8 +92,10 @@ func testAuthority(t *testing.T) (*visa.Signer, *clearinghouse.Clearinghouse, *t
 }
 
 // buildFixture writes files (relative path -> content) under one dataset root,
-// rebuilds the index, and serves the handler. The caller owns close.
-func buildFixture(t *testing.T, files map[string]string) *fixture {
+// rebuilds the index, and serves the handler. Each opt mutates the Settings
+// before the handler is built, so a test can, e.g., disable the admin token. The
+// caller owns close.
+func buildFixture(t *testing.T, files map[string]string, opts ...func(*drs.Settings)) *fixture {
 	t.Helper()
 	root := t.TempDir()
 	for rel, content := range files {
@@ -121,16 +128,20 @@ func buildFixture(t *testing.T, files map[string]string) *fixture {
 	}
 
 	signer, ch, tokens := testAuthority(t)
+	settings := testSettings()
+	for _, opt := range opts {
+		opt(&settings)
+	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	srv := httptest.NewServer(drs.NewHandler(ix, ch, tokens, testSettings(), logger))
+	srv := httptest.NewServer(drs.NewHandler(ix, backend, ch, tokens, encryption.None{}, settings, logger))
 
-	return &fixture{srv: srv, ix: ix, records: records, ids: ids, signer: signer}
+	return &fixture{srv: srv, ix: ix, records: records, ids: ids, signer: signer, tokens: tokens}
 }
 
 // newFixture builds a fixture whose resources are released at test end.
-func newFixture(t *testing.T, files map[string]string) *fixture {
+func newFixture(t *testing.T, files map[string]string, opts ...func(*drs.Settings)) *fixture {
 	t.Helper()
-	f := buildFixture(t, files)
+	f := buildFixture(t, files, opts...)
 	t.Cleanup(f.close)
 
 	return f
@@ -144,6 +155,82 @@ func (f *fixture) close() {
 // url builds an absolute request URL under the DRS base path.
 func (f *fixture) url(path string) string {
 	return f.srv.URL + drs.BasePath + path
+}
+
+// dataURL builds the delivery URL for an object (outside the DRS base path).
+func (f *fixture) dataURL(id string) string {
+	return f.srv.URL + "/data/" + id
+}
+
+// adminRevokeURL builds the admin revoke URL.
+func (f *fixture) adminRevokeURL() string {
+	return f.srv.URL + "/admin/revoke"
+}
+
+// accessToken drives the real authorization flow — POST a granting passport to
+// the access endpoint — and returns the session token the client would carry to
+// the delivery endpoint.
+func (f *fixture) accessToken(t *testing.T, id string) string {
+	t.Helper()
+
+	resp := f.postPassports(t, "/objects/"+id+"/access/0", f.passport(t, f.grantVisa(t, datasetURL)))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("access status = %d, want 200", resp.StatusCode)
+	}
+	var access drs.AccessURL
+	decodeBody(t, resp, &access)
+	if len(access.Headers) != 1 {
+		t.Fatalf("access headers = %q, want one Authorization header", access.Headers)
+	}
+
+	return strings.TrimPrefix(access.Headers[0], "Authorization: Bearer ")
+}
+
+// httpResult captures everything a delivery or admin test inspects, so the
+// request helpers can read and close the body themselves and no open response
+// escapes.
+type httpResult struct {
+	status int
+	header http.Header
+	body   []byte
+}
+
+// fetchData issues a method request to /data/{id} with the given bearer token
+// and optional extra headers, then reads and closes the body.
+func (f *fixture) fetchData(t *testing.T, method, id, bearer string, headers map[string]string) httpResult {
+	t.Helper()
+
+	req, err := http.NewRequest(method, f.dataURL(id), nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	return do(t, req)
+}
+
+// do runs req against the test server and returns the drained result.
+func do(t *testing.T, req *http.Request) httpResult {
+	t.Helper()
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", req.Method, req.URL, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+
+	return httpResult{status: resp.StatusCode, header: resp.Header, body: body}
 }
 
 // grantVisa mints a visa asserting that a DAC granted testSubject access to

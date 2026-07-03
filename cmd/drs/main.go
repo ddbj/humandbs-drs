@@ -19,6 +19,7 @@ import (
 	"github.com/ddbj/humandbs-drs/internal/clearinghouse"
 	"github.com/ddbj/humandbs-drs/internal/config"
 	"github.com/ddbj/humandbs-drs/internal/drs"
+	"github.com/ddbj/humandbs-drs/internal/encryption"
 	"github.com/ddbj/humandbs-drs/internal/httpx"
 	"github.com/ddbj/humandbs-drs/internal/index"
 	"github.com/ddbj/humandbs-drs/internal/storage"
@@ -26,11 +27,6 @@ import (
 )
 
 const serviceName = "humandbs-drs"
-
-// sessionTokenTTL is the lifetime of a delivery session token: short, so a
-// revoked grant stops mattering within minutes even without an explicit revoke
-// (architecture.md § "配信設計").
-const sessionTokenTTL = 5 * time.Minute
 
 // jwksFetchTimeout bounds each startup JWKS fetch.
 const jwksFetchTimeout = 10 * time.Second
@@ -96,14 +92,12 @@ func run(args []string, getenv func(string) string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	tokens, err := token.NewStore(sessionTokenTTL)
+	tokens, err := token.NewStore(cfg.SessionTTL)
 	if err != nil {
 		return err
 	}
 
-	mux := http.NewServeMux()
-	mux.Handle("GET /healthz", httpx.Health(serviceName, buildinfo.Version))
-	mux.Handle(drs.BasePath+"/", drs.NewHandler(idx, ch, tokens, drs.Settings{
+	drsHandler := drs.NewHandler(idx, backend, ch, tokens, encryption.None{}, drs.Settings{
 		PublicHost:     cfg.PublicHost,
 		ServiceID:      cfg.ServiceID,
 		ServiceName:    cfg.ServiceName,
@@ -111,7 +105,14 @@ func run(args []string, getenv func(string) string, stdout io.Writer) error {
 		OrgURL:         cfg.OrgURL,
 		Version:        buildinfo.Version,
 		TrustedIssuers: advertised,
-	}, logger))
+		AdminToken:     cfg.AdminToken,
+	}, logger)
+
+	mux := http.NewServeMux()
+	mux.Handle("GET /healthz", httpx.Health(serviceName, buildinfo.Version))
+	// The DRS handler registers full paths (DRS API under BasePath, plus /data
+	// and /admin), so it is mounted at the root; /healthz stays more specific.
+	mux.Handle("/", drsHandler)
 
 	return httpx.Serve(ctx, cfg.Addr, mux, logger)
 }

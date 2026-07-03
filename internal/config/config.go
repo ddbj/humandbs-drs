@@ -49,6 +49,14 @@ type DRSConfig struct {
 	// Their issuer URLs are advertised as passport_auth_issuers in the OPTIONS
 	// Authorizations (architecture.md § "Clearinghouse 設計").
 	TrustedIssuers []TrustedIssuer
+	// SessionTTL is the lifetime of a delivery session token: short, so a
+	// revoked grant stops mattering within minutes even without an explicit
+	// revoke (architecture.md § "配信設計").
+	SessionTTL time.Duration
+	// AdminToken authenticates the internal POST /admin/revoke control-plane
+	// call. Empty disables revocation (the endpoint answers 503), so it is
+	// fail-closed (architecture.md § "配信設計").
+	AdminToken string
 }
 
 // IssuerConfig holds the configuration for the Visa issuer.
@@ -87,6 +95,8 @@ const (
 	envDRSOrgName        = "HUMANDBS_DRS_ORG_NAME"
 	envDRSOrgURL         = "HUMANDBS_DRS_ORG_URL"
 	envDRSTrustedIssuers = "HUMANDBS_DRS_TRUSTED_ISSUERS"
+	envDRSSessionTTL     = "HUMANDBS_DRS_SESSION_TTL"
+	envDRSAdminToken     = "HUMANDBS_DRS_ADMIN_TOKEN"
 
 	envIssuerAddr         = "HUMANDBS_ISSUER_ADDR"
 	envIssuerPublicURL    = "HUMANDBS_ISSUER_PUBLIC_URL"
@@ -100,6 +110,7 @@ const (
 	defaultDRSAddr    = ":28000"
 	defaultIssuerAddr = ":28001"
 	defaultVisaTTL    = "1h"
+	defaultSessionTTL = "5m"
 )
 
 // MissingError reports required configuration fields that resolved to empty.
@@ -122,6 +133,8 @@ type DRSFlags struct {
 	orgName        *string
 	orgURL         *string
 	trustedIssuers *string
+	sessionTTL     *string
+	adminToken     *string
 }
 
 // RegisterDRSFlags registers the DRS configuration flags on fs. The caller
@@ -137,6 +150,8 @@ func RegisterDRSFlags(fs *flag.FlagSet) *DRSFlags {
 		orgName:        fs.String("org-name", "", "service-info organization name (required)"),
 		orgURL:         fs.String("org-url", "", "service-info organization URL (required)"),
 		trustedIssuers: fs.String("trusted-issuer", "", "comma-separated <issuer URL>=<JWKS URL> pairs of trusted visa issuers (required)"),
+		sessionTTL:     fs.String("session-ttl", "", "delivery session token lifetime as a Go duration (default "+defaultSessionTTL+")"),
+		adminToken:     fs.String("admin-token", "", "shared secret authenticating POST /admin/revoke; empty disables revocation (optional)"),
 	}
 }
 
@@ -157,6 +172,7 @@ func (f *DRSFlags) Resolve(fs *flag.FlagSet, getenv func(string) string) (DRSCon
 		OrgName:        resolve(set, "org-name", *f.orgName, getenv(envDRSOrgName), ""),
 		OrgURL:         resolve(set, "org-url", *f.orgURL, getenv(envDRSOrgURL), ""),
 		TrustedIssuers: trustedIssuers,
+		AdminToken:     resolve(set, "admin-token", *f.adminToken, getenv(envDRSAdminToken), ""),
 	}
 
 	var missing []string
@@ -190,6 +206,16 @@ func (f *DRSFlags) Resolve(fs *flag.FlagSet, getenv func(string) string) (DRSCon
 	if len(missing) > 0 {
 		return DRSConfig{}, &MissingError{Fields: missing}
 	}
+
+	ttlValue := resolve(set, "session-ttl", *f.sessionTTL, getenv(envDRSSessionTTL), defaultSessionTTL)
+	ttl, err := time.ParseDuration(ttlValue)
+	if err != nil {
+		return DRSConfig{}, fmt.Errorf("invalid session-ttl %q: %w", ttlValue, err)
+	}
+	if ttl <= 0 {
+		return DRSConfig{}, fmt.Errorf("session-ttl must be positive, got %s", ttl)
+	}
+	cfg.SessionTTL = ttl
 
 	return cfg, nil
 }

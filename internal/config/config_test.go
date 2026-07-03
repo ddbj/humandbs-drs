@@ -80,6 +80,59 @@ func TestDRSDefaults(t *testing.T) {
 	}
 }
 
+func TestDRSSessionTTLAndAdminTokenDefaults(t *testing.T) {
+	cfg, err := loadDRS(t, nil, validDRSEnv())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.SessionTTL != 5*time.Minute {
+		t.Errorf("SessionTTL = %s, want default 5m", cfg.SessionTTL)
+	}
+	if cfg.AdminToken != "" {
+		t.Errorf("AdminToken = %q, want empty (revocation off)", cfg.AdminToken)
+	}
+}
+
+func TestDRSSessionTTLAndAdminTokenResolve(t *testing.T) {
+	environ := validDRSEnv()
+	environ[envDRSSessionTTL] = "30m"
+	environ[envDRSAdminToken] = "env-secret"
+	cfg, err := loadDRS(t, []string{"-session-ttl", "90s", "-admin-token", "flag-secret"}, environ)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.SessionTTL != 90*time.Second {
+		t.Errorf("SessionTTL = %s, want flag value 90s", cfg.SessionTTL)
+	}
+	if cfg.AdminToken != "flag-secret" {
+		t.Errorf("AdminToken = %q, want flag value %q", cfg.AdminToken, "flag-secret")
+	}
+}
+
+func TestDRSSessionTTLFromEnv(t *testing.T) {
+	environ := validDRSEnv()
+	environ[envDRSSessionTTL] = "10m"
+	cfg, err := loadDRS(t, nil, environ)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.SessionTTL != 10*time.Minute {
+		t.Errorf("SessionTTL = %s, want env value 10m", cfg.SessionTTL)
+	}
+}
+
+func TestDRSRejectsBadSessionTTL(t *testing.T) {
+	for _, ttl := range []string{"nonsense", "0s", "-1m"} {
+		t.Run(ttl, func(t *testing.T) {
+			environ := validDRSEnv()
+			environ[envDRSSessionTTL] = ttl
+			if _, err := loadDRS(t, nil, environ); err == nil {
+				t.Fatalf("want error for session-ttl %q, got nil", ttl)
+			}
+		})
+	}
+}
+
 func TestDRSEnvOverridesDefault(t *testing.T) {
 	environ := validDRSEnv()
 	environ[envDRSAddr] = ":9000"

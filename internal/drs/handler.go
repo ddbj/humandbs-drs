@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/ddbj/humandbs-drs/internal/clearinghouse"
+	"github.com/ddbj/humandbs-drs/internal/encryption"
 	"github.com/ddbj/humandbs-drs/internal/index"
+	"github.com/ddbj/humandbs-drs/internal/storage"
 	"github.com/ddbj/humandbs-drs/internal/token"
 )
 
@@ -35,7 +37,8 @@ const (
 )
 
 // Settings holds the deployment-supplied values the handler needs to build
-// self URIs, service-info, and the OPTIONS authorizations.
+// self URIs, service-info, the OPTIONS authorizations, and to authenticate the
+// admin revoke endpoint.
 type Settings struct {
 	PublicHost     string
 	ServiceID      string
@@ -44,32 +47,42 @@ type Settings struct {
 	OrgURL         string
 	Version        string
 	TrustedIssuers []string
+	// AdminToken is the shared secret authenticating POST /admin/revoke. Empty
+	// disables revocation (the endpoint answers 503), so it is fail-closed
+	// (architecture.md § "配信設計").
+	AdminToken string
 }
 
 // handler serves the DRS API over the derived index, deciding access with the
-// Clearinghouse and issuing session tokens for authorized delivery.
+// Clearinghouse, issuing session tokens, and streaming authorized bytes from
+// the storage backend through the encryption provider.
 type handler struct {
 	idx      *index.Index
+	backend  storage.Backend
 	ch       *clearinghouse.Clearinghouse
 	tokens   *token.Store
+	enc      encryption.Provider
 	settings Settings
 	logger   *slog.Logger
 }
 
-// NewHandler wires the DRS 1.5 endpoints (architecture.md § "DRS server 設計"):
+// NewHandler wires the DRS 1.5 endpoints (architecture.md § "DRS server 設計")
+// plus the authorized delivery and admin revoke endpoints (§ "配信設計"):
 //
 //   - GET /service-info — service metadata
 //   - GET/POST /objects/{id} — the Object (POST also accepts passports)
 //   - OPTIONS /objects/{id} — the supported authorizations
 //   - GET/POST /objects/{id}/access/{access_id} — the AccessURL once authorized
+//   - GET/HEAD /data/{object_id} — the object bytes, per-request session token
+//   - POST /admin/revoke — revoke a subject's sessions (internal, admin secret)
 //
-// The mux registers full paths including BasePath, so the returned handler is
-// self-contained and can be mounted at "/".
-func NewHandler(idx *index.Index, ch *clearinghouse.Clearinghouse, tokens *token.Store, s Settings, logger *slog.Logger) http.Handler {
+// The mux registers full paths, so the returned handler is self-contained and
+// is mounted at "/" (the delivery and admin paths sit outside BasePath).
+func NewHandler(idx *index.Index, backend storage.Backend, ch *clearinghouse.Clearinghouse, tokens *token.Store, enc encryption.Provider, s Settings, logger *slog.Logger) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	h := &handler{idx: idx, ch: ch, tokens: tokens, settings: s, logger: logger}
+	h := &handler{idx: idx, backend: backend, ch: ch, tokens: tokens, enc: enc, settings: s, logger: logger}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+BasePath+"/service-info", h.serveServiceInfo)
@@ -78,6 +91,10 @@ func NewHandler(idx *index.Index, ch *clearinghouse.Clearinghouse, tokens *token
 	mux.HandleFunc("OPTIONS "+BasePath+"/objects/{id}", h.serveOptions)
 	mux.HandleFunc("GET "+BasePath+"/objects/{id}/access/{access_id}", h.serveAccess)
 	mux.HandleFunc("POST "+BasePath+"/objects/{id}/access/{access_id}", h.serveAccess)
+	// A GET pattern also matches HEAD (net/http ServeMux), so serveData handles
+	// both and skips the body for HEAD.
+	mux.HandleFunc("GET /data/{object_id}", h.serveData)
+	mux.HandleFunc("POST /admin/revoke", h.serveRevoke)
 
 	return mux
 }
@@ -175,7 +192,7 @@ func (h *handler) serveAccess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tok, _, err := h.tokens.Issue(rec.ID, grant.Subject, grant.Issuer)
+	tok, _, err := h.tokens.Issue(rec.ID, rec.DatasetURL, grant.Subject, grant.Issuer)
 	if err != nil {
 		h.logger.Error("issue session token", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
