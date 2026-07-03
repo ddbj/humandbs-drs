@@ -12,10 +12,11 @@ import (
 )
 
 // TestPassportGrantSetsRoundTrip checks over arbitrary grant sets that Passport
-// is a 1:1 transform: each grant yields exactly one visa whose claims mirror
-// it, exp never exceeds now+TTL, jtis are unique, the visa subject is the
-// requested one regardless of the grant rows, and a grant already expired at
-// issue time yields a visa the verifier rejects as expired.
+// mints a verifiable envelope holding a 1:1 transform of the grants: each grant
+// yields exactly one visa whose claims mirror it, exp never exceeds now+TTL,
+// jtis are unique, the visa subject is the requested one regardless of the
+// grant rows, and a grant already expired at issue time yields a visa the
+// verifier rejects as expired.
 func TestPassportGrantSetsRoundTrip(t *testing.T) {
 	p, verifier := newPassportKit(t, fixedClock(refTime))
 
@@ -26,16 +27,26 @@ func TestPassportGrantSetsRoundTrip(t *testing.T) {
 			grants[i] = drawGrant(rt, fmt.Sprintf("g%d", i))
 		}
 
-		visas, err := p.Passport(subject, grants)
+		token, err := p.Passport(subject, grants)
 		if err != nil {
 			rt.Fatalf("Passport: %v", err)
 		}
-		if len(visas) != len(grants) {
-			rt.Fatalf("len(visas) = %d, want %d", len(visas), len(grants))
+		pc, err := verifier.VerifyPassport(token)
+		if err != nil {
+			rt.Fatalf("VerifyPassport: %v", err)
+		}
+		if pc.Subject != subject {
+			rt.Fatalf("passport sub = %q, want %q", pc.Subject, subject)
+		}
+		if want := refTime.Add(testTTL); !pc.Expires.Equal(want) {
+			rt.Fatalf("passport exp = %s, want %s", pc.Expires, want)
+		}
+		if len(pc.Visas) != len(grants) {
+			rt.Fatalf("len(visas) = %d, want %d", len(pc.Visas), len(grants))
 		}
 
 		jtis := make(map[string]bool)
-		for i, raw := range visas {
+		for i, raw := range pc.Visas {
 			g := grants[i]
 			wantExp := refTime.Add(testTTL)
 			if g.Expires != nil && g.Expires.Before(wantExp) {

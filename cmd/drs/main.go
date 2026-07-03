@@ -13,16 +13,27 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/ddbj/humandbs-drs/internal/buildinfo"
+	"github.com/ddbj/humandbs-drs/internal/clearinghouse"
 	"github.com/ddbj/humandbs-drs/internal/config"
 	"github.com/ddbj/humandbs-drs/internal/drs"
 	"github.com/ddbj/humandbs-drs/internal/httpx"
 	"github.com/ddbj/humandbs-drs/internal/index"
 	"github.com/ddbj/humandbs-drs/internal/storage"
+	"github.com/ddbj/humandbs-drs/internal/token"
 )
 
 const serviceName = "humandbs-drs"
+
+// sessionTokenTTL is the lifetime of a delivery session token: short, so a
+// revoked grant stops mattering within minutes even without an explicit revoke
+// (architecture.md § "配信設計").
+const sessionTokenTTL = 5 * time.Minute
+
+// jwksFetchTimeout bounds each startup JWKS fetch.
+const jwksFetchTimeout = 10 * time.Second
 
 func main() {
 	if err := run(os.Args[1:], os.Getenv, os.Stdout); err != nil {
@@ -81,19 +92,56 @@ func run(args []string, getenv func(string) string, stdout io.Writer) error {
 	}
 	logger.Info("index rebuilt", "objects", n)
 
+	ch, advertised, err := buildClearinghouse(ctx, cfg.TrustedIssuers, logger)
+	if err != nil {
+		return err
+	}
+	tokens, err := token.NewStore(sessionTokenTTL)
+	if err != nil {
+		return err
+	}
+
 	mux := http.NewServeMux()
 	mux.Handle("GET /healthz", httpx.Health(serviceName, buildinfo.Version))
-	mux.Handle(drs.BasePath+"/", drs.NewHandler(idx, drs.Settings{
+	mux.Handle(drs.BasePath+"/", drs.NewHandler(idx, ch, tokens, drs.Settings{
 		PublicHost:     cfg.PublicHost,
 		ServiceID:      cfg.ServiceID,
 		ServiceName:    cfg.ServiceName,
 		OrgName:        cfg.OrgName,
 		OrgURL:         cfg.OrgURL,
 		Version:        buildinfo.Version,
-		TrustedIssuers: cfg.TrustedIssuers,
+		TrustedIssuers: advertised,
 	}, logger))
 
 	return httpx.Serve(ctx, cfg.Addr, mux, logger)
+}
+
+// buildClearinghouse pins each trusted issuer's keys from its configured JWKS
+// URL and returns the Clearinghouse plus the issuer URLs to advertise in
+// OPTIONS. Key rotation takes effect on restart
+// (architecture.md § "Clearinghouse 設計").
+func buildClearinghouse(ctx context.Context, issuers []config.TrustedIssuer, logger *slog.Logger) (*clearinghouse.Clearinghouse, []string, error) {
+	trusted := make([]clearinghouse.Issuer, 0, len(issuers))
+	advertised := make([]string, 0, len(issuers))
+	for _, ti := range issuers {
+		fetchCtx, cancel := context.WithTimeout(ctx, jwksFetchTimeout)
+		keys, err := clearinghouse.FetchKeys(fetchCtx, ti.JWKSURL)
+		cancel()
+		if err != nil {
+			return nil, nil, err
+		}
+		logger.Info("pinned issuer keys", "issuer", ti.Issuer, "jwks", ti.JWKSURL, "keys", keys.Len())
+
+		trusted = append(trusted, clearinghouse.Issuer{URL: ti.Issuer, JWKSURL: ti.JWKSURL, Keys: keys})
+		advertised = append(advertised, ti.Issuer)
+	}
+
+	ch, err := clearinghouse.New(trusted, clearinghouse.WithLogger(logger))
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return ch, advertised, nil
 }
 
 // loadManifest reads the dataset manifest from path.

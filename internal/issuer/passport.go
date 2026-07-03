@@ -14,8 +14,9 @@ import (
 // (architecture.md § "Issuer 設計").
 const visaBy = "dac"
 
-// PassportIssuer turns a subject's grants into signed ControlledAccessGrants
-// visas, the content of a GA4GH Passport (ga4gh_passport_v1).
+// PassportIssuer turns a subject's grants into a signed GA4GH Passport: a JWT
+// whose ga4gh_passport_v1 claim carries one signed ControlledAccessGrants visa
+// per grant.
 type PassportIssuer struct {
 	signer    *visa.Signer
 	issuerURL string
@@ -56,13 +57,13 @@ func NewPassportIssuer(signer *visa.Signer, issuerURL string, ttl time.Duration,
 	return p, nil
 }
 
-// Passport signs one visa per grant for subject and returns the encoded tokens,
-// an empty slice when there are none. Callers pass the subject's active grants
-// (GrantStore.ActiveBySubject); the transform is 1:1 and does not re-check
-// grant expiry. A visa expires at now + TTL, or at the grant's earlier expiry,
-// so no visa outlives its grant nor the configured cap
-// (architecture.md § "Issuer 設計").
-func (p *PassportIssuer) Passport(subject string, grants []Grant) ([]string, error) {
+// Passport signs one visa per grant for subject, wraps them in a signed
+// Passport, and returns its encoded JWT. Callers pass the subject's active
+// grants (GrantStore.ActiveBySubject); the transform is 1:1 and does not
+// re-check grant expiry. A visa expires at now + TTL, or at the grant's earlier
+// expiry, so no visa outlives its grant nor the configured cap. The Passport
+// envelope itself expires at now + TTL (architecture.md § "Issuer 設計").
+func (p *PassportIssuer) Passport(subject string, grants []Grant) (string, error) {
 	now := p.now()
 	visas := make([]string, 0, len(grants))
 	for _, g := range grants {
@@ -87,10 +88,22 @@ func (p *PassportIssuer) Passport(subject string, grants []Grant) ([]string, err
 			},
 		})
 		if err != nil {
-			return nil, fmt.Errorf("issuer: sign visa for %s: %w", g.DatasetID, err)
+			return "", fmt.Errorf("issuer: sign visa for %s: %w", g.DatasetID, err)
 		}
 		visas = append(visas, signed)
 	}
 
-	return visas, nil
+	passport, err := p.signer.SignPassport(visa.PassportClaims{
+		Issuer:   p.issuerURL,
+		Subject:  subject,
+		IssuedAt: now,
+		Expires:  now.Add(p.ttl),
+		ID:       uuid.NewString(),
+		Visas:    visas,
+	})
+	if err != nil {
+		return "", fmt.Errorf("issuer: sign passport: %w", err)
+	}
+
+	return passport, nil
 }

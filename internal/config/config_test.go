@@ -56,7 +56,7 @@ func validDRSEnv() map[string]string {
 		envDRSServiceName:    "HumanDBs DRS",
 		envDRSOrgName:        "DDBJ",
 		envDRSOrgURL:         "https://www.ddbj.nig.ac.jp/",
-		envDRSTrustedIssuers: "https://issuer.example.org",
+		envDRSTrustedIssuers: "https://issuer.example.org=https://issuer.example.org/jwks",
 	}
 }
 
@@ -74,8 +74,9 @@ func TestDRSDefaults(t *testing.T) {
 	if cfg.ServiceID != "jp.ac.nig.ddbj.humandbs-drs" {
 		t.Errorf("ServiceID = %q, want %q", cfg.ServiceID, "jp.ac.nig.ddbj.humandbs-drs")
 	}
-	if len(cfg.TrustedIssuers) != 1 || cfg.TrustedIssuers[0] != "https://issuer.example.org" {
-		t.Errorf("TrustedIssuers = %v, want [https://issuer.example.org]", cfg.TrustedIssuers)
+	want := TrustedIssuer{Issuer: "https://issuer.example.org", JWKSURL: "https://issuer.example.org/jwks"}
+	if len(cfg.TrustedIssuers) != 1 || cfg.TrustedIssuers[0] != want {
+		t.Errorf("TrustedIssuers = %v, want [%v]", cfg.TrustedIssuers, want)
 	}
 }
 
@@ -149,18 +150,56 @@ func TestDRSExplicitEmptyRequiredFlagFails(t *testing.T) {
 	}
 }
 
-// A comma-separated trusted-issuer resolves to a trimmed, non-empty list.
+// A comma-separated trusted-issuer resolves to a trimmed, non-empty list of
+// issuer/JWKS pairs, split at the first "=" so a query in the JWKS URL
+// survives.
 func TestDRSTrustedIssuersSplit(t *testing.T) {
 	environ := validDRSEnv()
-	environ[envDRSTrustedIssuers] = "https://a.example.org, https://b.example.org ,,https://c.example.org"
+	environ[envDRSTrustedIssuers] = "https://a.example.org=https://a.example.org/jwks, https://b.example.org=https://keys.example.org/jwks?tenant=b ,,https://c.example.org=https://c.example.org/jwks"
 	cfg, err := loadDRS(t, nil, environ)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	got := strings.Join(cfg.TrustedIssuers, "|")
-	want := "https://a.example.org|https://b.example.org|https://c.example.org"
-	if got != want {
-		t.Errorf("TrustedIssuers = %q, want %q", got, want)
+	want := []TrustedIssuer{
+		{Issuer: "https://a.example.org", JWKSURL: "https://a.example.org/jwks"},
+		{Issuer: "https://b.example.org", JWKSURL: "https://keys.example.org/jwks?tenant=b"},
+		{Issuer: "https://c.example.org", JWKSURL: "https://c.example.org/jwks"},
+	}
+	if len(cfg.TrustedIssuers) != len(want) {
+		t.Fatalf("TrustedIssuers = %v, want %v", cfg.TrustedIssuers, want)
+	}
+	for i := range want {
+		if cfg.TrustedIssuers[i] != want[i] {
+			t.Errorf("TrustedIssuers[%d] = %v, want %v", i, cfg.TrustedIssuers[i], want[i])
+		}
+	}
+}
+
+// A malformed trusted-issuer entry is a configuration error, not a silently
+// dropped item.
+func TestDRSTrustedIssuersRejectsMalformedEntries(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+	}{
+		{"missing separator", "https://issuer.example.org"},
+		{"empty issuer", "=https://issuer.example.org/jwks"},
+		{"empty jwks", "https://issuer.example.org="},
+		{"issuer not a URL", "not a url=https://issuer.example.org/jwks"},
+		{"issuer without host", "https://=https://issuer.example.org/jwks"},
+		{"issuer wrong scheme", "ftp://issuer.example.org=https://issuer.example.org/jwks"},
+		{"jwks wrong scheme", "https://issuer.example.org=file:///etc/jwks.json"},
+		{"issuer with query", "https://issuer.example.org/?a=b=https://issuer.example.org/jwks"},
+		{"duplicate issuer", "https://issuer.example.org=https://a/jwks,https://issuer.example.org=https://b/jwks"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			environ := validDRSEnv()
+			environ[envDRSTrustedIssuers] = tc.value
+			if _, err := loadDRS(t, nil, environ); err == nil {
+				t.Fatal("expected error, got nil")
+			}
+		})
 	}
 }
 

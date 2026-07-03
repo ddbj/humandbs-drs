@@ -1,7 +1,11 @@
 package drs_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -12,21 +16,32 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/ddbj/humandbs-drs/internal/clearinghouse"
 	"github.com/ddbj/humandbs-drs/internal/drs"
 	"github.com/ddbj/humandbs-drs/internal/index"
 	"github.com/ddbj/humandbs-drs/internal/storage"
+	"github.com/ddbj/humandbs-drs/internal/token"
+	"github.com/ddbj/humandbs-drs/internal/visa"
 )
 
-const datasetURL = "https://ddbj.nig.ac.jp/search/entry/jga-dataset/JGAD000001"
+const (
+	datasetURL    = "https://ddbj.nig.ac.jp/search/entry/jga-dataset/JGAD000001"
+	testIssuerURL = "https://issuer.example.org"
+	testJWKSURL   = testIssuerURL + "/jwks"
+	testSubject   = "user-123"
+)
 
 // fixture is a running DRS handler backed by a real filesystem tree indexed into
-// a real SQLite database; only the FS and DB boundaries are exercised.
+// a real SQLite database, with a Clearinghouse trusting one test issuer whose
+// signer mints real passports; only the FS and DB boundaries are exercised.
 type fixture struct {
 	srv     *httptest.Server
 	ix      *index.Index
 	records map[string]index.Record
 	ids     []string
+	signer  *visa.Signer
 }
 
 func testSettings() drs.Settings {
@@ -37,8 +52,38 @@ func testSettings() drs.Settings {
 		OrgName:        "DDBJ",
 		OrgURL:         "https://www.ddbj.nig.ac.jp/",
 		Version:        "test",
-		TrustedIssuers: []string{"https://issuer.example.org"},
+		TrustedIssuers: []string{testIssuerURL},
 	}
+}
+
+// testAuthority builds the signer of the trusted test issuer and a
+// Clearinghouse pinning its public key, plus a session token store.
+func testAuthority(t *testing.T) (*visa.Signer, *clearinghouse.Clearinghouse, *token.Store) {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	const kid = "key-1"
+	signer, err := visa.NewSigner(key, kid, testJWKSURL)
+	if err != nil {
+		t.Fatalf("NewSigner: %v", err)
+	}
+	keys, err := visa.PublicJWKS(visa.KeyEntry{KeyID: kid, Public: key.Public()})
+	if err != nil {
+		t.Fatalf("PublicJWKS: %v", err)
+	}
+	ch, err := clearinghouse.New([]clearinghouse.Issuer{{URL: testIssuerURL, JWKSURL: testJWKSURL, Keys: keys}})
+	if err != nil {
+		t.Fatalf("clearinghouse.New: %v", err)
+	}
+	tokens, err := token.NewStore(5 * time.Minute)
+	if err != nil {
+		t.Fatalf("token.NewStore: %v", err)
+	}
+
+	return signer, ch, tokens
 }
 
 // buildFixture writes files (relative path -> content) under one dataset root,
@@ -75,10 +120,11 @@ func buildFixture(t *testing.T, files map[string]string) *fixture {
 		ids = append(ids, rec.ID)
 	}
 
+	signer, ch, tokens := testAuthority(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	srv := httptest.NewServer(drs.NewHandler(ix, testSettings(), logger))
+	srv := httptest.NewServer(drs.NewHandler(ix, ch, tokens, testSettings(), logger))
 
-	return &fixture{srv: srv, ix: ix, records: records, ids: ids}
+	return &fixture{srv: srv, ix: ix, records: records, ids: ids, signer: signer}
 }
 
 // newFixture builds a fixture whose resources are released at test end.
@@ -98,6 +144,69 @@ func (f *fixture) close() {
 // url builds an absolute request URL under the DRS base path.
 func (f *fixture) url(path string) string {
 	return f.srv.URL + drs.BasePath + path
+}
+
+// grantVisa mints a visa asserting that a DAC granted testSubject access to
+// dataset, valid for an hour from now.
+func (f *fixture) grantVisa(t *testing.T, dataset string) string {
+	t.Helper()
+
+	now := time.Now()
+	signed, err := f.signer.Sign(visa.Claims{
+		Issuer:   testIssuerURL,
+		Subject:  testSubject,
+		IssuedAt: now,
+		Expires:  now.Add(time.Hour),
+		ID:       "test-grant",
+		Visa: visa.Object{
+			Type:     visa.TypeControlledAccessGrants,
+			Asserted: now.Add(-24 * time.Hour).Unix(),
+			Value:    dataset,
+			Source:   "https://ddbj.nig.ac.jp/dac",
+			By:       "dac",
+		},
+	})
+	if err != nil {
+		t.Fatalf("sign visa: %v", err)
+	}
+
+	return signed
+}
+
+// passport wraps visas in a signed Passport for testSubject.
+func (f *fixture) passport(t *testing.T, visas ...string) string {
+	t.Helper()
+
+	now := time.Now()
+	signed, err := f.signer.SignPassport(visa.PassportClaims{
+		Issuer:   testIssuerURL,
+		Subject:  testSubject,
+		IssuedAt: now,
+		Expires:  now.Add(time.Hour),
+		Visas:    visas,
+	})
+	if err != nil {
+		t.Fatalf("sign passport: %v", err)
+	}
+
+	return signed
+}
+
+// postPassports POSTs a passports body to path and returns the drained
+// response.
+func (f *fixture) postPassports(t *testing.T, path string, passports ...string) *http.Response {
+	t.Helper()
+
+	body, err := json.Marshal(map[string]any{"passports": passports})
+	if err != nil {
+		t.Fatalf("marshal body: %v", err)
+	}
+	resp, err := http.Post(f.url(path), "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST %s: %v", path, err)
+	}
+
+	return resp
 }
 
 func writeFile(t *testing.T, path, content string) {

@@ -46,19 +46,48 @@ func newPassportKit(t *testing.T, now func() time.Time) (*PassportIssuer, *visa.
 	return issuer, visa.NewVerifier(keys, visa.WithClock(now))
 }
 
+// mintPassport mints a passport for subject and verifies its envelope,
+// returning the decoded claims so tests can inspect the embedded visas.
+func mintPassport(t *testing.T, p *PassportIssuer, verifier *visa.Verifier, subject string, grants []Grant) visa.PassportClaims {
+	t.Helper()
+
+	token, err := p.Passport(subject, grants)
+	if err != nil {
+		t.Fatalf("Passport: %v", err)
+	}
+	pc, err := verifier.VerifyPassport(token)
+	if err != nil {
+		t.Fatalf("VerifyPassport: %v", err)
+	}
+
+	return pc
+}
+
 func TestPassportMintsVerifiableVisa(t *testing.T) {
 	p, verifier := newPassportKit(t, fixedClock(refTime))
 	grant := sampleGrant()
 
-	visas, err := p.Passport(grant.Subject, []Grant{grant})
-	if err != nil {
-		t.Fatalf("Passport: %v", err)
+	pc := mintPassport(t, p, verifier, grant.Subject, []Grant{grant})
+	if pc.Issuer != testIssuerURL {
+		t.Errorf("passport iss = %q, want %q", pc.Issuer, testIssuerURL)
 	}
-	if len(visas) != 1 {
-		t.Fatalf("len(visas) = %d, want 1", len(visas))
+	if pc.Subject != grant.Subject {
+		t.Errorf("passport sub = %q, want %q", pc.Subject, grant.Subject)
+	}
+	if !pc.IssuedAt.Equal(refTime) {
+		t.Errorf("passport iat = %s, want %s", pc.IssuedAt, refTime)
+	}
+	if want := refTime.Add(testTTL); !pc.Expires.Equal(want) {
+		t.Errorf("passport exp = %s, want %s", pc.Expires, want)
+	}
+	if pc.ID == "" {
+		t.Error("passport jti is empty, want a unique token ID")
+	}
+	if len(pc.Visas) != 1 {
+		t.Fatalf("len(visas) = %d, want 1", len(pc.Visas))
 	}
 
-	claims, err := verifier.Verify(visas[0])
+	claims, err := verifier.Verify(pc.Visas[0])
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -116,11 +145,8 @@ func TestPassportExpiryCappedByTTL(t *testing.T) {
 			grant := sampleGrant()
 			grant.Expires = tt.expires
 
-			visas, err := p.Passport(grant.Subject, []Grant{grant})
-			if err != nil {
-				t.Fatalf("Passport: %v", err)
-			}
-			claims, err := verifier.Verify(visas[0])
+			pc := mintPassport(t, p, verifier, grant.Subject, []Grant{grant})
+			claims, err := verifier.Verify(pc.Visas[0])
 			if err != nil {
 				t.Fatalf("Verify: %v", err)
 			}
@@ -131,15 +157,12 @@ func TestPassportExpiryCappedByTTL(t *testing.T) {
 	}
 }
 
-func TestPassportEmptyGrantsReturnsEmptySlice(t *testing.T) {
-	p, _ := newPassportKit(t, fixedClock(refTime))
+func TestPassportEmptyGrantsMintsEmptyVisaArray(t *testing.T) {
+	p, verifier := newPassportKit(t, fixedClock(refTime))
 
-	visas, err := p.Passport("user-123", nil)
-	if err != nil {
-		t.Fatalf("Passport: %v", err)
-	}
-	if visas == nil || len(visas) != 0 {
-		t.Errorf("visas = %#v, want empty non-nil slice", visas)
+	pc := mintPassport(t, p, verifier, "user-123", nil)
+	if len(pc.Visas) != 0 {
+		t.Errorf("visas = %#v, want empty", pc.Visas)
 	}
 }
 
@@ -148,11 +171,8 @@ func TestPassportOmitsAbsentConditions(t *testing.T) {
 	grant := sampleGrant()
 	grant.Conditions = nil
 
-	visas, err := p.Passport(grant.Subject, []Grant{grant})
-	if err != nil {
-		t.Fatalf("Passport: %v", err)
-	}
-	claims, err := verifier.Verify(visas[0])
+	pc := mintPassport(t, p, verifier, grant.Subject, []Grant{grant})
+	claims, err := verifier.Verify(pc.Visas[0])
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}

@@ -1,12 +1,14 @@
-// Package visa implements GA4GH Visa Document Tokens: the assembly, signing,
-// parsing, and verification of the self-contained JWTs that a Visa Issuer mints
-// and a Passport Clearinghouse validates. It is shared by cmd/issuer and the DRS
-// Clearinghouse (architecture.md § "Issuer 設計", § "Clearinghouse 設計").
+// Package visa implements GA4GH Visa Document Tokens and Passports: the
+// assembly, signing, parsing, and verification of the JWTs that a Visa Issuer
+// mints and a Passport Clearinghouse validates. It is shared by cmd/issuer and
+// the DRS Clearinghouse (architecture.md § "Issuer 設計", § "Clearinghouse 設計").
 //
-// A Visa Document Token carries the ga4gh_visa_v1 claim (a Visa Object) alongside
-// the standard iss/sub/iat/exp claims, signed with RS256 or ES256. Only those two
-// algorithms are accepted; unsigned ("none") and HMAC ("HS256") tokens are rejected
-// to block algorithm-confusion attacks (AAI profile § Signing Algorithms).
+// A Visa Document Token carries the ga4gh_visa_v1 claim (a Visa Object), and a
+// Passport carries the ga4gh_passport_v1 claim (an array of Visa JWTs), each
+// alongside the standard iss/sub/iat/exp claims and signed with RS256 or ES256.
+// Only those two algorithms are accepted; unsigned ("none") and HMAC ("HS256")
+// tokens are rejected to block algorithm-confusion attacks (AAI profile
+// § Signing Algorithms).
 package visa
 
 import (
@@ -45,8 +47,24 @@ var (
 	ErrTokenExpired = errors.New("visa: token expired")
 	// ErrTokenNotYetIssued reports a token whose iat is in the future.
 	ErrTokenNotYetIssued = errors.New("visa: token issued in the future")
+	// ErrTokenNotYetValid reports a token whose nbf is in the future.
+	ErrTokenNotYetValid = errors.New("visa: token not yet valid")
 	// ErrUnsupportedKey reports a key that is neither RSA nor ECDSA P-256.
 	ErrUnsupportedKey = errors.New("visa: unsupported key type")
+	// ErrUnexpectedTokenType reports a `typ` header that does not name the
+	// expected token type (RFC 7515 §4.1.9 comparison).
+	ErrUnexpectedTokenType = errors.New("visa: unexpected token type")
+	// ErrAudiencePresent reports a token carrying an `aud` claim. This verifier
+	// never checks audiences, and accepting an audience-restricted token without
+	// confirming the audience would violate RFC 8725 §3.9.
+	ErrAudiencePresent = errors.New("visa: aud claim not supported")
+	// ErrCriticalHeader reports a token with a `crit` header. No JWS extensions
+	// are supported, and RFC 7515 §4.1.11 forbids accepting a token whose
+	// critical extensions are not understood.
+	ErrCriticalHeader = errors.New("visa: critical headers not supported")
+	// ErrInvalidClaim reports a required claim whose value has the wrong JSON
+	// shape, such as a ga4gh_passport_v1 that is not an array of strings.
+	ErrInvalidClaim = errors.New("visa: invalid claim value")
 )
 
 // Object is the value of the ga4gh_visa_v1 claim, a GA4GH Visa Object

@@ -7,6 +7,7 @@ import (
 	"crypto/rsa"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/lestrrat-go/jwx/v3/jwa"
 	"github.com/lestrrat-go/jwx/v3/jws"
@@ -44,7 +45,7 @@ func NewSigner(key crypto.PrivateKey, kid, jku string) (*Signer, error) {
 // standard claim (iss, sub, iat, exp) is absent, so an incomplete visa is never
 // minted.
 func (s *Signer) Sign(c Claims) (string, error) {
-	if err := c.requireStandardClaims(); err != nil {
+	if err := requireStandardClaims(c.Issuer, c.Subject, c.IssuedAt, c.Expires); err != nil {
 		return "", err
 	}
 
@@ -63,8 +64,15 @@ func (s *Signer) Sign(c Claims) (string, error) {
 		return "", fmt.Errorf("visa: build token: %w", err)
 	}
 
+	return s.signToken(tok, tokenType)
+}
+
+// signToken signs tok with the Signer's key under the given `typ` header,
+// attaching the kid and, when configured, the jku. Visas and passports share
+// this so the header discipline cannot diverge between the two token kinds.
+func (s *Signer) signToken(tok jwt.Token, typ string) (string, error) {
 	hdr := jws.NewHeaders()
-	if err := hdr.Set(jws.TypeKey, tokenType); err != nil {
+	if err := hdr.Set(jws.TypeKey, typ); err != nil {
 		return "", fmt.Errorf("visa: set typ header: %w", err)
 	}
 	if err := hdr.Set(jws.KeyIDKey, s.kid); err != nil {
@@ -85,19 +93,19 @@ func (s *Signer) Sign(c Claims) (string, error) {
 }
 
 // requireStandardClaims reports the standard claims the specification marks
-// REQUIRED but that are absent from c.
-func (c Claims) requireStandardClaims() error {
+// REQUIRED on both visas and passports but that are absent.
+func requireStandardClaims(iss, sub string, iat, exp time.Time) error {
 	var missing []string
-	if c.Issuer == "" {
+	if iss == "" {
 		missing = append(missing, "iss")
 	}
-	if c.Subject == "" {
+	if sub == "" {
 		missing = append(missing, "sub")
 	}
-	if c.IssuedAt.IsZero() {
+	if iat.IsZero() {
 		missing = append(missing, "iat")
 	}
-	if c.Expires.IsZero() {
+	if exp.IsZero() {
 		missing = append(missing, "exp")
 	}
 	if len(missing) > 0 {

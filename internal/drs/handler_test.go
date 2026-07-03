@@ -258,3 +258,110 @@ func TestAccessUnknownObjectReturns404(t *testing.T) {
 		t.Fatalf("status = %d, want 404", resp.StatusCode)
 	}
 }
+
+func TestAccessGrantsAuthorizedPassport(t *testing.T) {
+	f := newFixture(t, map[string]string{"a.txt": "aaa"})
+	id := f.ids[0]
+
+	passport := f.passport(t, f.grantVisa(t, datasetURL))
+	resp := f.postPassports(t, "/objects/"+id+"/access/0", passport)
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var access drs.AccessURL
+	decodeBody(t, resp, &access)
+	if want := "https://drs.example.org/data/" + id; access.URL != want {
+		t.Errorf("url = %q, want %q", access.URL, want)
+	}
+	if len(access.Headers) != 1 || !strings.HasPrefix(access.Headers[0], "Authorization: Bearer ") {
+		t.Fatalf("headers = %q, want one Authorization: Bearer header", access.Headers)
+	}
+	if token := strings.TrimPrefix(access.Headers[0], "Authorization: Bearer "); len(token) < 32 {
+		t.Errorf("session token %q is too short to be opaque", token)
+	}
+}
+
+// TestAccessSessionTokensAreFresh pins that each authorization mints its own
+// token: sharing one across grants would let a revocation miss requests.
+func TestAccessSessionTokensAreFresh(t *testing.T) {
+	f := newFixture(t, map[string]string{"a.txt": "aaa"})
+	id := f.ids[0]
+	passport := f.passport(t, f.grantVisa(t, datasetURL))
+
+	issue := func() string {
+		resp := f.postPassports(t, "/objects/"+id+"/access/0", passport)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		var access drs.AccessURL
+		decodeBody(t, resp, &access)
+
+		return access.Headers[0]
+	}
+
+	if first, second := issue(), issue(); first == second {
+		t.Errorf("two authorizations returned the same session token")
+	}
+}
+
+func TestAccessDeniesUngrantedDataset(t *testing.T) {
+	f := newFixture(t, map[string]string{"a.txt": "aaa"})
+	id := f.ids[0]
+
+	cases := map[string][]string{
+		"grant for another dataset": {f.grantVisa(t, "https://ddbj.nig.ac.jp/search/entry/jga-dataset/JGAD999999")},
+		"no visas at all":           {},
+	}
+	for name, visas := range cases {
+		t.Run(name, func(t *testing.T) {
+			resp := f.postPassports(t, "/objects/"+id+"/access/0", f.passport(t, visas...))
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403", resp.StatusCode)
+			}
+		})
+	}
+}
+
+// TestAccessRejectsInvalidPassports pins that a request carrying an invalid
+// passport is 401 even when a valid granting passport accompanies it.
+func TestAccessRejectsInvalidPassports(t *testing.T) {
+	f := newFixture(t, map[string]string{"a.txt": "aaa"})
+	id := f.ids[0]
+	granting := f.passport(t, f.grantVisa(t, datasetURL))
+
+	cases := map[string][]string{
+		"garbage alone":          {"not-a-jwt"},
+		"garbage beside a grant": {granting, "not-a-jwt"},
+	}
+	for name, passports := range cases {
+		t.Run(name, func(t *testing.T) {
+			resp := f.postPassports(t, "/objects/"+id+"/access/0", passports...)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", resp.StatusCode)
+			}
+			if resp.Header.Get("WWW-Authenticate") == "" {
+				t.Error("missing WWW-Authenticate header")
+			}
+		})
+	}
+}
+
+func TestAccessRejectsOversizedBody(t *testing.T) {
+	f := newFixture(t, map[string]string{"a.txt": "aaa"})
+	id := f.ids[0]
+
+	huge := `{"passports":["` + strings.Repeat("A", 1<<20) + `"]}`
+	resp, err := http.Post(f.url("/objects/"+id+"/access/0"), "application/json", strings.NewReader(huge))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}

@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/ddbj/humandbs-drs/internal/clearinghouse"
 	"github.com/ddbj/humandbs-drs/internal/index"
+	"github.com/ddbj/humandbs-drs/internal/token"
 )
 
 const (
@@ -26,6 +28,10 @@ const (
 	// maxBulkRequestLength is emitted for service-info schema compliance; bulk
 	// endpoints are not served.
 	maxBulkRequestLength = 1
+
+	// maxBodyBytes caps request bodies; a passports array has no business being
+	// larger (architecture.md § "Clearinghouse 設計").
+	maxBodyBytes = 1 << 20
 )
 
 // Settings holds the deployment-supplied values the handler needs to build
@@ -40,9 +46,12 @@ type Settings struct {
 	TrustedIssuers []string
 }
 
-// handler serves the DRS API over the derived index.
+// handler serves the DRS API over the derived index, deciding access with the
+// Clearinghouse and issuing session tokens for authorized delivery.
 type handler struct {
 	idx      *index.Index
+	ch       *clearinghouse.Clearinghouse
+	tokens   *token.Store
 	settings Settings
 	logger   *slog.Logger
 }
@@ -56,11 +65,11 @@ type handler struct {
 //
 // The mux registers full paths including BasePath, so the returned handler is
 // self-contained and can be mounted at "/".
-func NewHandler(idx *index.Index, s Settings, logger *slog.Logger) http.Handler {
+func NewHandler(idx *index.Index, ch *clearinghouse.Clearinghouse, tokens *token.Store, s Settings, logger *slog.Logger) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	h := &handler{idx: idx, settings: s, logger: logger}
+	h := &handler{idx: idx, ch: ch, tokens: tokens, settings: s, logger: logger}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+BasePath+"/service-info", h.serveServiceInfo)
@@ -86,12 +95,14 @@ func (h *handler) serveServiceInfo(w http.ResponseWriter, _ *http.Request) {
 }
 
 // serveObject answers GET and POST /objects/{id} with the Object. The POST
-// body's expand and passports are accepted but not yet acted on; authorization
-// is applied by the Clearinghouse in a later stage.
+// body's passports are accepted but not used for authorization: object
+// metadata is public and the Object never embeds an access_url
+// (architecture.md § "Clearinghouse 設計"), so nothing in the response depends
+// on it. expand is accepted and ignored because bundles are not served.
 func (h *handler) serveObject(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		var body postObjectBody
-		if err := decodeJSON(r, &body); err != nil {
+		if err := decodeJSON(w, r, &body); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid request body")
 
 			return
@@ -119,11 +130,16 @@ func (h *handler) serveOptions(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// serveAccess answers GET and POST /objects/{id}/access/{access_id}. An unknown
-// object or access_id is 404; a known one requires passport authorization,
-// which is not yet implemented, so the response is 401.
+// serveAccess answers GET and POST /objects/{id}/access/{access_id}. An
+// unknown object or access_id is 404. The POST body's passports go through the
+// Clearinghouse: authorization mints a session token and returns the AccessURL
+// of the delivery endpoint; a request without a usable credential is 401 and a
+// verified one without a grant for this object's dataset is 403
+// (architecture.md § "DRS server 設計"). A GET carries no passports and is
+// always 401.
 func (h *handler) serveAccess(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.lookup(w, r); !ok {
+	rec, ok := h.lookup(w, r)
+	if !ok {
 		return
 	}
 	if r.PathValue("access_id") != accessID {
@@ -131,17 +147,49 @@ func (h *handler) serveAccess(w http.ResponseWriter, r *http.Request) {
 
 		return
 	}
+
+	var body passportsBody
 	if r.Method == http.MethodPost {
-		var body passportsBody
-		if err := decodeJSON(r, &body); err != nil {
+		if err := decodeJSON(w, r, &body); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid request body")
 
 			return
 		}
 	}
 
-	w.Header().Set("WWW-Authenticate", "Bearer")
-	writeError(w, http.StatusUnauthorized, "passport authorization required")
+	grant, err := h.ch.Authorize(r.Context(), body.Passports, rec.DatasetURL)
+	switch {
+	case errors.Is(err, clearinghouse.ErrNoValidPassport):
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		writeError(w, http.StatusUnauthorized, "passport authorization required")
+
+		return
+	case errors.Is(err, clearinghouse.ErrNotAuthorized):
+		writeError(w, http.StatusForbidden, "passport grants no access to this object")
+
+		return
+	case err != nil:
+		h.logger.Error("authorize access", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+
+		return
+	}
+
+	tok, _, err := h.tokens.Issue(rec.ID, grant.Subject, grant.Issuer)
+	if err != nil {
+		h.logger.Error("issue session token", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+
+		return
+	}
+	h.logger.Info("access granted",
+		"object", rec.ID, "dataset", rec.DatasetURL,
+		"subject", grant.Subject, "issuer", grant.Issuer, "jti", grant.JTI)
+
+	writeJSON(w, http.StatusOK, AccessURL{
+		URL:     "https://" + h.settings.PublicHost + "/data/" + rec.ID,
+		Headers: []string{"Authorization: Bearer " + tok},
+	})
 }
 
 // lookup resolves the {id} path value to a Record, writing the 404 or 500
@@ -185,13 +233,14 @@ type passportsBody struct {
 	Passports []string `json:"passports"`
 }
 
-// decodeJSON reads a JSON request body into dst. An empty body is allowed; a
-// malformed one is an error.
-func decodeJSON(r *http.Request, dst any) error {
+// decodeJSON reads a JSON request body into dst, refusing bodies over
+// maxBodyBytes. An empty body is allowed; a malformed or oversized one is an
+// error.
+func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 	if r.Body == nil {
 		return nil
 	}
-	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(dst); err != nil {
 		if errors.Is(err, io.EOF) {
 			return nil
 		}

@@ -7,11 +7,12 @@ import (
 	"strings"
 )
 
-// passportResponse is the body of GET /permissions/{user}: the user's visas
-// under the ga4gh_passport_v1 claim name (requirements.md § 4.4). Passport is
-// never nil so a user without grants receives an empty array, not null.
+// passportResponse is the body of GET /permissions/{user}: the user's signed
+// Passport JWT, whose ga4gh_passport_v1 claim carries the visas
+// (requirements.md § 4.4). A user without grants receives a passport with an
+// empty visa array.
 type passportResponse struct {
-	Passport []string `json:"ga4gh_passport_v1"`
+	Passport string `json:"passport"`
 }
 
 // handler serves the issuer HTTP API.
@@ -79,7 +80,7 @@ func (h *handler) servePermissions(w http.ResponseWriter, r *http.Request) {
 
 		return
 	}
-	visas, err := h.passport.Passport(subject, grants)
+	passport, err := h.passport.Passport(subject, grants)
 	if err != nil {
 		h.logger.Error("mint passport", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
@@ -87,7 +88,7 @@ func (h *handler) servePermissions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, passportResponse{Passport: visas})
+	writeJSON(w, http.StatusOK, passportResponse{Passport: passport})
 }
 
 // bearerToken extracts the token of an RFC 6750 Authorization header. The

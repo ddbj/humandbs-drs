@@ -286,7 +286,7 @@ func TestAllowedAlg(t *testing.T) {
 	}
 }
 
-func TestProtectedAlgRejectsMalformed(t *testing.T) {
+func TestProtectedHeaderRejectsMalformed(t *testing.T) {
 	cases := []struct {
 		name string
 		raw  string
@@ -300,7 +300,7 @@ func TestProtectedAlgRejectsMalformed(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := protectedAlg(tc.raw); !errors.Is(err, ErrMalformedToken) {
+			if _, err := protectedHeader(tc.raw); !errors.Is(err, ErrMalformedToken) {
 				t.Fatalf("error = %v, want ErrMalformedToken", err)
 			}
 		})

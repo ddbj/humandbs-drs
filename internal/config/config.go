@@ -7,9 +7,21 @@ package config
 import (
 	"flag"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 )
+
+// TrustedIssuer names a visa issuer the DRS Clearinghouse trusts and the JWKS
+// URL its verification keys are pinned from at startup
+// (architecture.md § "Clearinghouse 設計").
+type TrustedIssuer struct {
+	// Issuer is the issuer URL, matched verbatim against the token `iss` claim.
+	Issuer string
+	// JWKSURL is fetched once at startup to pin the issuer's public keys; a
+	// token `jku` header must equal it exactly.
+	JWKSURL string
+}
 
 // DRSConfig holds the configuration for the DRS server.
 type DRSConfig struct {
@@ -32,9 +44,11 @@ type DRSConfig struct {
 	OrgName string
 	// OrgURL is the service-info organization URL.
 	OrgURL string
-	// TrustedIssuers are the visa issuers advertised as passport_auth_issuers
-	// in the OPTIONS Authorizations (architecture.md § "Clearinghouse 設計").
-	TrustedIssuers []string
+	// TrustedIssuers are the issuers whose passports and visas the
+	// Clearinghouse accepts, each with the JWKS URL its keys are pinned from.
+	// Their issuer URLs are advertised as passport_auth_issuers in the OPTIONS
+	// Authorizations (architecture.md § "Clearinghouse 設計").
+	TrustedIssuers []TrustedIssuer
 }
 
 // IssuerConfig holds the configuration for the Visa issuer.
@@ -122,13 +136,17 @@ func RegisterDRSFlags(fs *flag.FlagSet) *DRSFlags {
 		serviceName:    fs.String("service-name", "", "service-info human-readable name (required)"),
 		orgName:        fs.String("org-name", "", "service-info organization name (required)"),
 		orgURL:         fs.String("org-url", "", "service-info organization URL (required)"),
-		trustedIssuers: fs.String("trusted-issuer", "", "comma-separated visa issuers advertised by OPTIONS (required)"),
+		trustedIssuers: fs.String("trusted-issuer", "", "comma-separated <issuer URL>=<JWKS URL> pairs of trusted visa issuers (required)"),
 	}
 }
 
 // Resolve produces a DRSConfig from the parsed flags and the environment.
 func (f *DRSFlags) Resolve(fs *flag.FlagSet, getenv func(string) string) (DRSConfig, error) {
 	set := setFlags(fs)
+	trustedIssuers, err := parseTrustedIssuers(resolve(set, "trusted-issuer", *f.trustedIssuers, getenv(envDRSTrustedIssuers), ""))
+	if err != nil {
+		return DRSConfig{}, err
+	}
 	cfg := DRSConfig{
 		Addr:           resolve(set, "addr", *f.addr, getenv(envDRSAddr), defaultDRSAddr),
 		PublicHost:     resolve(set, "public-host", *f.publicHost, getenv(envDRSPublicHost), ""),
@@ -138,7 +156,7 @@ func (f *DRSFlags) Resolve(fs *flag.FlagSet, getenv func(string) string) (DRSCon
 		ServiceName:    resolve(set, "service-name", *f.serviceName, getenv(envDRSServiceName), ""),
 		OrgName:        resolve(set, "org-name", *f.orgName, getenv(envDRSOrgName), ""),
 		OrgURL:         resolve(set, "org-url", *f.orgURL, getenv(envDRSOrgURL), ""),
-		TrustedIssuers: splitList(resolve(set, "trusted-issuer", *f.trustedIssuers, getenv(envDRSTrustedIssuers), "")),
+		TrustedIssuers: trustedIssuers,
 	}
 
 	var missing []string
@@ -247,6 +265,63 @@ func (f *IssuerFlags) Resolve(fs *flag.FlagSet, getenv func(string) string) (Iss
 	cfg.VisaTTL = ttl
 
 	return cfg, nil
+}
+
+// parseTrustedIssuers parses a comma-separated list of <issuer URL>=<JWKS URL>
+// pairs, split at the first "=" so a query string in the JWKS URL survives. An
+// issuer URL is matched verbatim against token `iss` claims (no trailing-slash
+// normalization), must be http(s), and must carry no query or fragment — a "="
+// inside the issuer would make the pair ambiguous. Duplicate issuers are
+// rejected rather than silently merged. URLs containing a comma cannot be
+// expressed in this format.
+func parseTrustedIssuers(v string) ([]TrustedIssuer, error) {
+	entries := splitList(v)
+	issuers := make([]TrustedIssuer, 0, len(entries))
+	seen := make(map[string]bool)
+	for _, entry := range entries {
+		issuer, jwks, found := strings.Cut(entry, "=")
+		if !found {
+			return nil, fmt.Errorf("trusted-issuer entry %q must be <issuer URL>=<JWKS URL>", entry)
+		}
+		issuer = strings.TrimSpace(issuer)
+		jwks = strings.TrimSpace(jwks)
+
+		issuerURL, err := parseHTTPURL(issuer)
+		if err != nil {
+			return nil, fmt.Errorf("trusted-issuer entry %q: issuer URL: %w", entry, err)
+		}
+		if issuerURL.RawQuery != "" || issuerURL.Fragment != "" {
+			return nil, fmt.Errorf("trusted-issuer entry %q: issuer URL must not carry a query or fragment", entry)
+		}
+		if _, err := parseHTTPURL(jwks); err != nil {
+			return nil, fmt.Errorf("trusted-issuer entry %q: JWKS URL: %w", entry, err)
+		}
+		if seen[issuer] {
+			return nil, fmt.Errorf("duplicate trusted issuer %q", issuer)
+		}
+		seen[issuer] = true
+
+		issuers = append(issuers, TrustedIssuer{Issuer: issuer, JWKSURL: jwks})
+	}
+
+	return issuers, nil
+}
+
+// parseHTTPURL requires an absolute http or https URL with a host. Plain http
+// stays allowed for local development setups.
+func parseHTTPURL(s string) (*url.URL, error) {
+	u, err := url.Parse(s)
+	if err != nil {
+		return nil, fmt.Errorf("invalid URL %q: %w", s, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("URL %q must use http or https", s)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("URL %q has no host", s)
+	}
+
+	return u, nil
 }
 
 // splitList parses a comma-separated value into trimmed, non-empty items.

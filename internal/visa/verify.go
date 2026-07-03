@@ -53,88 +53,150 @@ func NewVerifier(keys jwk.Set, opts ...VerifierOption) *Verifier {
 	return v
 }
 
-// Verify checks raw and returns its claims. It rejects, in order: a header
-// algorithm outside the allowlist (before any key is consulted), a bad signature
-// or unknown `kid`, an absent required claim, an expired token, and a token
-// issued in the future.
+// Verify checks a Visa Document Token and returns its claims. It rejects, in
+// order: a header outside the shared allowlist (before any key is consulted), a
+// bad signature or unknown `kid`, an absent required claim, and a temporal
+// violation. Visas do not require a `typ` header (it is OPTIONAL in the spec),
+// so none is enforced.
 func (v *Verifier) Verify(raw string) (Claims, error) {
-	alg, err := protectedAlg(raw)
+	tok, err := v.parseVerified(raw, "")
 	if err != nil {
 		return Claims{}, err
-	}
-	if !allowedAlg(alg) {
-		return Claims{}, fmt.Errorf("%w: %q", ErrAlgorithmNotAllowed, alg)
-	}
-
-	// The signature is verified here; temporal validation is deferred to this
-	// method so it uses the injected clock and reports the sentinel errors.
-	tok, err := jwt.Parse([]byte(raw),
-		jwt.WithKeySet(v.keys, jws.WithRequireKid(true)),
-		jwt.WithValidate(false),
-	)
-	if err != nil {
-		return Claims{}, fmt.Errorf("visa: verify token: %w", err)
 	}
 
 	claims, err := claimsFromToken(tok)
 	if err != nil {
 		return Claims{}, err
 	}
-	if err := v.checkTemporal(claims); err != nil {
+	if err := v.checkTemporal(tok, claims.IssuedAt, claims.Expires); err != nil {
 		return Claims{}, err
 	}
 
 	return claims, nil
 }
 
-// checkTemporal rejects an expired or not-yet-issued token. A token is valid
-// while now is before exp and iat is not beyond now, each widened by the leeway.
-func (v *Verifier) checkTemporal(c Claims) error {
+// parseVerified runs the checks shared by visa and passport verification: the
+// RS256/ES256 allowlist and crit rejection read from the protected header before
+// any key is consulted, the expected `typ` when one is required, the signature
+// against the key selected by `kid`, and the absence of an `aud` claim.
+// Temporal validation is left to the caller so it uses the injected clock.
+func (v *Verifier) parseVerified(raw, wantTyp string) (jwt.Token, error) {
+	hdr, err := protectedHeader(raw)
+	if err != nil {
+		return nil, err
+	}
+	if !allowedAlg(hdr.Alg) {
+		return nil, fmt.Errorf("%w: %q", ErrAlgorithmNotAllowed, hdr.Alg)
+	}
+	if len(hdr.Crit) > 0 {
+		return nil, fmt.Errorf("%w: %v", ErrCriticalHeader, hdr.Crit)
+	}
+	if wantTyp != "" && !typeMatches(hdr.Typ, wantTyp) {
+		return nil, fmt.Errorf("%w: typ %q, want %q", ErrUnexpectedTokenType, hdr.Typ, wantTyp)
+	}
+
+	tok, err := jwt.Parse([]byte(raw),
+		jwt.WithKeySet(v.keys, jws.WithRequireKid(true)),
+		jwt.WithValidate(false),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("visa: verify token: %w", err)
+	}
+
+	if aud, ok := tok.Audience(); ok && len(aud) > 0 {
+		return nil, fmt.Errorf("%w: aud %q", ErrAudiencePresent, aud)
+	}
+
+	return tok, nil
+}
+
+// checkTemporal rejects an expired or not-yet-valid token. A token is valid
+// while now is before exp, iat is not beyond now, and any nbf is not beyond now,
+// each widened by the leeway.
+func (v *Verifier) checkTemporal(tok jwt.Token, iat, exp time.Time) error {
 	now := time.Now()
 	if v.now != nil {
 		now = v.now()
 	}
 
-	if !now.Before(c.Expires.Add(v.leeway)) {
-		return fmt.Errorf("%w: exp %s, now %s", ErrTokenExpired, c.Expires.UTC(), now.UTC())
+	if !now.Before(exp.Add(v.leeway)) {
+		return fmt.Errorf("%w: exp %s, now %s", ErrTokenExpired, exp.UTC(), now.UTC())
 	}
-	if c.IssuedAt.After(now.Add(v.leeway)) {
-		return fmt.Errorf("%w: iat %s, now %s", ErrTokenNotYetIssued, c.IssuedAt.UTC(), now.UTC())
+	if iat.After(now.Add(v.leeway)) {
+		return fmt.Errorf("%w: iat %s, now %s", ErrTokenNotYetIssued, iat.UTC(), now.UTC())
+	}
+	if nbf, ok := tok.NotBefore(); ok && nbf.After(now.Add(v.leeway)) {
+		return fmt.Errorf("%w: nbf %s, now %s", ErrTokenNotYetValid, nbf.UTC(), now.UTC())
 	}
 
 	return nil
 }
 
-// protectedAlg reads the `alg` of a compact JWS from its protected header without
-// verifying the signature, so an untrusted algorithm is rejected before any key
-// material is used.
-func protectedAlg(raw string) (string, error) {
+// typeMatches compares a `typ` header value against the expected media type
+// using the RFC 7515 §4.1.9 rules: comparison is case-insensitive and a value
+// without a slash is equivalent to the same value under "application/".
+func typeMatches(got, want string) bool {
+	normalize := func(t string) string {
+		return strings.TrimPrefix(strings.ToLower(t), "application/")
+	}
+
+	return got != "" && normalize(got) == normalize(want)
+}
+
+// tokenHeader is the subset of a JWS protected header inspected before the
+// signature is verified.
+type tokenHeader struct {
+	Alg  string   `json:"alg"`
+	Typ  string   `json:"typ"`
+	Crit []string `json:"crit"`
+}
+
+// protectedHeader reads the protected header of a compact JWS without verifying
+// the signature, so an untrusted algorithm or unsupported extension is rejected
+// before any key material is used.
+func protectedHeader(raw string) (tokenHeader, error) {
 	first, _, ok := strings.Cut(raw, ".")
 	if !ok || first == "" {
-		return "", fmt.Errorf("%w: not a compact JWS", ErrMalformedToken)
+		return tokenHeader{}, fmt.Errorf("%w: not a compact JWS", ErrMalformedToken)
 	}
 
 	decoded, err := base64.RawURLEncoding.DecodeString(first)
 	if err != nil {
-		return "", fmt.Errorf("%w: header is not base64url", ErrMalformedToken)
+		return tokenHeader{}, fmt.Errorf("%w: header is not base64url", ErrMalformedToken)
 	}
 
-	var header struct {
-		Alg string `json:"alg"`
-	}
+	var header tokenHeader
 	if err := json.Unmarshal(decoded, &header); err != nil {
-		return "", fmt.Errorf("%w: header is not JSON", ErrMalformedToken)
+		return tokenHeader{}, fmt.Errorf("%w: header is not JSON", ErrMalformedToken)
 	}
 	if header.Alg == "" {
-		return "", fmt.Errorf("%w: header has no alg", ErrMalformedToken)
+		return tokenHeader{}, fmt.Errorf("%w: header has no alg", ErrMalformedToken)
 	}
 
-	return header.Alg, nil
+	return header, nil
 }
 
 // claimsFromToken extracts the required standard claims and the Visa Object,
 // reporting any that are absent.
 func claimsFromToken(tok jwt.Token) (Claims, error) {
+	iss, sub, iat, exp, err := standardClaimsFromToken(tok)
+	if err != nil {
+		return Claims{}, err
+	}
+
+	obj, err := visaFromToken(tok)
+	if err != nil {
+		return Claims{}, err
+	}
+
+	jti, _ := tok.JwtID()
+
+	return Claims{Issuer: iss, Subject: sub, IssuedAt: iat, Expires: exp, ID: jti, Visa: obj}, nil
+}
+
+// standardClaimsFromToken extracts the standard claims the specification marks
+// REQUIRED on both visas and passports, reporting any that are absent.
+func standardClaimsFromToken(tok jwt.Token) (iss, sub string, iat, exp time.Time, err error) {
 	iss, hasIss := tok.Issuer()
 	sub, hasSub := tok.Subject()
 	iat, hasIat := tok.IssuedAt()
@@ -154,17 +216,10 @@ func claimsFromToken(tok jwt.Token) (Claims, error) {
 		missing = append(missing, "exp")
 	}
 	if len(missing) > 0 {
-		return Claims{}, fmt.Errorf("%w: %s", ErrMissingClaim, strings.Join(missing, ", "))
+		return "", "", time.Time{}, time.Time{}, fmt.Errorf("%w: %s", ErrMissingClaim, strings.Join(missing, ", "))
 	}
 
-	obj, err := visaFromToken(tok)
-	if err != nil {
-		return Claims{}, err
-	}
-
-	jti, _ := tok.JwtID()
-
-	return Claims{Issuer: iss, Subject: sub, IssuedAt: iat, Expires: exp, ID: jti, Visa: obj}, nil
+	return iss, sub, iat, exp, nil
 }
 
 // visaFromToken decodes the ga4gh_visa_v1 claim into an Object by re-encoding the

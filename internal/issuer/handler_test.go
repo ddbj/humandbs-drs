@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -125,7 +124,7 @@ func TestPermissionsReturnsPassportOfActiveGrants(t *testing.T) {
 	k.seedGrant(t, "alice", "https://ddbj.nig.ac.jp/search/entry/jga-dataset/JGAD2", nil)
 	k.seedGrant(t, "bob", "https://ddbj.nig.ac.jp/search/entry/jga-dataset/JGAD3", nil)
 
-	visas := decodePassport(t, k.get(t, "/permissions/alice", k.idp.token(t, "alice", nil)))
+	visas := k.visasOf(t, k.get(t, "/permissions/alice", k.idp.token(t, "alice", nil)))
 
 	values := make(map[string]bool)
 	for _, raw := range visas {
@@ -156,12 +155,10 @@ func TestPermissionsEmptyWhenNoGrants(t *testing.T) {
 	k := newHandlerKit(t)
 
 	res := k.get(t, "/permissions/alice", k.idp.token(t, "alice", nil))
-	if visas := decodePassport(t, res); len(visas) != 0 {
+	// A user without grants still receives a verifiable passport; its visa
+	// array is just empty.
+	if visas := k.visasOf(t, res); len(visas) != 0 {
 		t.Errorf("visas = %v, want none", visas)
-	}
-	// The empty passport must be an array, not null.
-	if !strings.Contains(string(res.body), `"ga4gh_passport_v1":[]`) {
-		t.Errorf("body = %s, want an empty ga4gh_passport_v1 array", res.body)
 	}
 }
 
@@ -175,7 +172,7 @@ func TestPermissionsExcludesLapsedGrants(t *testing.T) {
 		g.Expires = timePtr(refTime)
 	})
 
-	if visas := decodePassport(t, k.get(t, "/permissions/alice", k.idp.token(t, "alice", nil))); len(visas) != 0 {
+	if visas := k.visasOf(t, k.get(t, "/permissions/alice", k.idp.token(t, "alice", nil))); len(visas) != 0 {
 		t.Errorf("visas = %v, want none for lapsed grants", visas)
 	}
 }
@@ -259,13 +256,17 @@ func TestJWKSServesVerificationKeysWithoutPrivateMaterial(t *testing.T) {
 		}
 	}
 
-	// A visa minted via /permissions must verify against the served JWKS.
-	visas := decodePassport(t, k.get(t, "/permissions/alice", k.idp.token(t, "alice", nil)))
-	if len(visas) != 1 {
-		t.Fatalf("len(visas) = %d, want 1", len(visas))
-	}
+	// A passport minted via /permissions must verify against the served JWKS,
+	// envelope and visa alike.
 	verifier := visa.NewVerifier(set, visa.WithClock(fixedClock(refTime)))
-	claims, err := verifier.Verify(visas[0])
+	pc, err := verifier.VerifyPassport(decodePassportJWT(t, k.get(t, "/permissions/alice", k.idp.token(t, "alice", nil))))
+	if err != nil {
+		t.Fatalf("verify passport against served JWKS: %v", err)
+	}
+	if len(pc.Visas) != 1 {
+		t.Fatalf("len(visas) = %d, want 1", len(pc.Visas))
+	}
+	claims, err := verifier.Verify(pc.Visas[0])
 	if err != nil {
 		t.Fatalf("verify against served JWKS: %v", err)
 	}
@@ -274,9 +275,8 @@ func TestJWKSServesVerificationKeysWithoutPrivateMaterial(t *testing.T) {
 	}
 }
 
-// decodePassport asserts a 200 response and returns the ga4gh_passport_v1
-// array.
-func decodePassport(t *testing.T, res httpResult) []string {
+// decodePassportJWT asserts a 200 response and returns the raw Passport JWT.
+func decodePassportJWT(t *testing.T, res httpResult) string {
 	t.Helper()
 
 	if res.status != http.StatusOK {
@@ -286,6 +286,22 @@ func decodePassport(t *testing.T, res httpResult) []string {
 	if err := json.Unmarshal(res.body, &pr); err != nil {
 		t.Fatalf("decode passport: %v (body %s)", err, res.body)
 	}
+	if pr.Passport == "" {
+		t.Fatalf("body %s carries no passport", res.body)
+	}
 
 	return pr.Passport
+}
+
+// visasOf asserts a 200 response, verifies the Passport envelope, and returns
+// the embedded visas.
+func (k *handlerKit) visasOf(t *testing.T, res httpResult) []string {
+	t.Helper()
+
+	pc, err := k.verifier.VerifyPassport(decodePassportJWT(t, res))
+	if err != nil {
+		t.Fatalf("verify passport envelope: %v", err)
+	}
+
+	return pc.Visas
 }
