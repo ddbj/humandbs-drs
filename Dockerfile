@@ -1,4 +1,4 @@
-# Build both binaries once, then expose one per target stage.
+# Build all binaries once, then expose one per target stage.
 FROM golang:1.26 AS build
 WORKDIR /src
 
@@ -24,3 +24,7 @@ FROM gcr.io/distroless/static-debian12 AS issuer
 COPY --from=build /out/issuer /issuer
 EXPOSE 28001
 ENTRYPOINT ["/issuer"]
+
+FROM gcr.io/distroless/static-debian12 AS s3-ingest
+COPY --from=build /out/drs-s3-ingest /drs-s3-ingest
+ENTRYPOINT ["/drs-s3-ingest"]

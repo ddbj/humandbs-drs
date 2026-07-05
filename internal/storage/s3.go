@@ -169,10 +169,22 @@ func (b *S3Backend) Open(ctx context.Context, loc string) (io.ReadSeekCloser, er
 // Scan would produce. datasetURL must be printable ASCII, the constraint S3
 // user-metadata header values carry.
 func (b *S3Backend) Put(ctx context.Context, datasetURL string, body io.Reader) (Entry, error) {
+	return b.PutWithID(ctx, uuid.NewString(), datasetURL, body)
+}
+
+// PutWithID stores body under the caller-supplied DRS id instead of minting
+// one, so an object can be restored or pre-assigned with a known id. The id
+// must be a canonical lowercase UUID string: ingested objects follow the same
+// s3 object ID scheme as minted ones (architecture.md § "object ID scheme"),
+// and rejecting non-canonical spellings keeps one UUID from appearing under
+// two ids. Everything else matches Put.
+func (b *S3Backend) PutWithID(ctx context.Context, id, datasetURL string, body io.Reader) (Entry, error) {
+	if parsed, err := uuid.Parse(id); err != nil || parsed.String() != id {
+		return Entry{}, fmt.Errorf("%w: %q is not a canonical UUID", ErrInvalidID, id)
+	}
 	if err := validateDatasetMeta(datasetURL); err != nil {
 		return Entry{}, err
 	}
-	id := uuid.NewString()
 	key := b.keyPrefix + id
 	if _, err := b.api.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(b.bucket),

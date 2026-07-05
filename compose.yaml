@@ -1,5 +1,12 @@
 name: humandbs-drs
 
+# Base topology: the four components and their internal wiring
+# (architecture.md § "全体構成"). Site-specific configuration — the Keycloak
+# realm, the drs storage settings and service identity, and the issuer grant
+# seed — is not part of this file; supply it through an override file the way
+# test/e2e/compose.e2e.yaml does. Without it, drs and issuer keep restarting
+# on their missing required configuration.
+
 services:
   drs:
     build:
@@ -7,9 +14,18 @@ services:
       target: drs
     environment:
       HUMANDBS_DRS_ADDR: ":28000"
-      HUMANDBS_DRS_PUBLIC_HOST: "localhost:28000"
+      HUMANDBS_DRS_INDEX_DB: /data/index.db
+      HUMANDBS_DRS_TRUSTED_ISSUERS: "http://issuer:28001=http://issuer:28001/jwks"
+    volumes:
+      - drs-data:/data
     ports:
       - "28000:28000"
+    # drs fetches the issuer's JWKS at startup and exits when it is not yet
+    # reachable; on-failure restarts absorb that startup race.
+    depends_on:
+      issuer:
+        condition: service_started
+    restart: on-failure
 
   issuer:
     build:
@@ -17,21 +33,45 @@ services:
       target: issuer
     environment:
       HUMANDBS_ISSUER_ADDR: ":28001"
-      HUMANDBS_ISSUER_PUBLIC_URL: "http://localhost:28001"
+      HUMANDBS_ISSUER_PUBLIC_URL: "http://issuer:28001"
+      HUMANDBS_ISSUER_SIGNING_KEY: /data/signing-key.pem
+      HUMANDBS_ISSUER_GRANT_DB: /data/grants.db
+    volumes:
+      # The signing key persists across restarts: drs pins the issuer's JWKS
+      # once at startup, so a regenerated key would break verification until
+      # drs restarts too.
+      - issuer-data:/data
     ports:
       - "28001:28001"
+    # The issuer fetches the OIDC discovery document at startup, so it waits
+    # for Keycloak to be ready (which includes any realm import).
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    restart: on-failure
 
   keycloak:
-    image: quay.io/keycloak/keycloak:26
-    command: ["start-dev", "--http-port=8180"]
+    image: quay.io/keycloak/keycloak:26.3.1
+    command: ["start-dev", "--http-port=8180", "--import-realm"]
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HEALTH_ENABLED: "true"
     ports:
       - "8180:8180"
+    # The image ships no HTTP client, but /bin/sh is bash: probe the
+    # management port's readiness endpoint over /dev/tcp.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.0\r\n\r\n' >&3 && grep -q '200 OK' <&3
+      interval: 5s
+      timeout: 5s
+      retries: 36
+      start_period: 15s
 
   seaweedfs:
-    image: chrislusf/seaweedfs:3.80
+    image: chrislusf/seaweedfs:4.37
     command:
       - server
       - -s3
@@ -47,6 +87,14 @@ services:
       - "8082:8082"
     volumes:
       - seaweedfs-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8333/"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
 
 volumes:
   seaweedfs-data:
+  issuer-data:
+  drs-data:

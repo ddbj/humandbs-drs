@@ -1,0 +1,10 @@
+[
+  {
+    "root": "/srv/datasets/jgad000001",
+    "dataset_resource_url": "https://ddbj.nig.ac.jp/search/entry/jga-dataset/JGAD000001"
+  },
+  {
+    "root": "/srv/datasets/jgad000002",
+    "dataset_resource_url": "https://ddbj.nig.ac.jp/search/entry/jga-dataset/JGAD000002"
+  }
+]

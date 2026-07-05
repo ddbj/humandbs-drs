@@ -1,0 +1,108 @@
+# End-to-end wiring over the base topology: fixture data, the identities the
+# tests expect, and a second drs instance on the s3 backend. Combine with the
+# base file (the Makefile e2e-up target does this):
+#
+#   docker compose -f compose.yaml -f test/e2e/compose.e2e.yaml up -d --build
+#
+# Values here mirror the constants in helpers_test.go and the fixture files.
+# Relative paths resolve against the project directory (the repository root,
+# where the first -f file lives), not against this file.
+
+services:
+  keycloak:
+    environment:
+      # Pin the issuer claim to the in-network name so tokens fetched from the
+      # host (localhost:8180) still verify against the discovery document the
+      # issuer container fetches from http://keycloak:8180.
+      KC_HOSTNAME: "http://keycloak:8180"
+    volumes:
+      - ./test/e2e/fixture/realm.json:/opt/keycloak/data/import/realm.json:ro
+
+  issuer:
+    environment:
+      HUMANDBS_ISSUER_OIDC_ISSUER: "http://keycloak:8180/realms/humandbs"
+      HUMANDBS_ISSUER_SEED: /seed/issuer-seed.json
+    volumes:
+      - ./test/e2e/fixture/issuer-seed.json:/seed/issuer-seed.json:ro
+
+  # The base drs serves the filesystem backend over the fixture datasets.
+  drs:
+    environment:
+      HUMANDBS_DRS_PUBLIC_HOST: "localhost:28000"
+      HUMANDBS_DRS_STORAGE_BACKEND: filesystem
+      HUMANDBS_DRS_MANIFEST: /etc/humandbs/manifest.json
+      HUMANDBS_DRS_ENCRYPTION: none
+      HUMANDBS_DRS_SERVICE_ID: jp.ac.nig.ddbj.humandbs-drs
+      HUMANDBS_DRS_SERVICE_NAME: "HumanDBs DRS"
+      HUMANDBS_DRS_ORG_NAME: DDBJ
+      HUMANDBS_DRS_ORG_URL: "https://www.ddbj.nig.ac.jp/"
+      HUMANDBS_DRS_ADMIN_TOKEN: e2e-admin-secret
+    volumes:
+      - ./test/e2e/fixture/drs-manifest.json:/etc/humandbs/manifest.json:ro
+      - ./test/e2e/fixture/testdata/fs/jgad000001:/srv/datasets/jgad000001:ro
+      - ./test/e2e/fixture/testdata/fs/jgad000002:/srv/datasets/jgad000002:ro
+
+  # A second drs on the s3 backend, reachable from the host on 28002. Its
+  # public host carries that mapped port so the AccessURL it hands out points
+  # back at itself.
+  drs-s3:
+    build:
+      context: .
+      target: drs
+    environment:
+      HUMANDBS_DRS_ADDR: ":28000"
+      HUMANDBS_DRS_PUBLIC_HOST: "localhost:28002"
+      HUMANDBS_DRS_STORAGE_BACKEND: s3
+      HUMANDBS_DRS_S3_ENDPOINT: "http://seaweedfs:8333"
+      HUMANDBS_DRS_S3_BUCKET: humandbs-e2e
+      HUMANDBS_DRS_S3_ACCESS_KEY: any
+      HUMANDBS_DRS_S3_SECRET_KEY: any
+      HUMANDBS_DRS_INDEX_DB: /data/index.db
+      HUMANDBS_DRS_TRUSTED_ISSUERS: "http://issuer:28001=http://issuer:28001/jwks"
+      HUMANDBS_DRS_ENCRYPTION: none
+      HUMANDBS_DRS_SERVICE_ID: jp.ac.nig.ddbj.humandbs-drs
+      HUMANDBS_DRS_SERVICE_NAME: "HumanDBs DRS"
+      HUMANDBS_DRS_ORG_NAME: DDBJ
+      HUMANDBS_DRS_ORG_URL: "https://www.ddbj.nig.ac.jp/"
+      HUMANDBS_DRS_ADMIN_TOKEN: e2e-admin-secret
+    volumes:
+      - drs-s3-data:/data
+    ports:
+      - "28002:28000"
+    # The startup scan only indexes objects that already exist, so the seed
+    # must have completed before this instance starts.
+    depends_on:
+      issuer:
+        condition: service_started
+      s3-seed:
+        condition: service_completed_successfully
+    restart: on-failure
+
+  # One-shot ingest of the fixture object, under the id the tests expect.
+  s3-seed:
+    build:
+      context: .
+      target: s3-ingest
+    command:
+      - -endpoint
+      - http://seaweedfs:8333
+      - -bucket
+      - humandbs-e2e
+      - -access-key
+      - any
+      - -secret-key
+      - any
+      - -dataset
+      - https://ddbj.nig.ac.jp/search/entry/jga-dataset/JGAD000001
+      - -id
+      - d9c1b0a8-97e6-45d4-83c2-b1a09f8e7d6c
+      - /seed/payload.bin
+    volumes:
+      - ./test/e2e/fixture/testdata/s3/payload.bin:/seed/payload.bin:ro
+    depends_on:
+      seaweedfs:
+        condition: service_healthy
+    restart: "no"
+
+volumes:
+  drs-s3-data:

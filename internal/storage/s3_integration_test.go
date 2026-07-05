@@ -127,6 +127,42 @@ func TestS3IntegrationPutScanOpen(t *testing.T) {
 	}
 }
 
+func TestS3IntegrationPutWithIDScanRecoversID(t *testing.T) {
+	cfg := s3TestConfig(t)
+	b := newIntegrationBucket(t, cfg)
+	ctx := context.Background()
+	content := "pre-assigned id over SeaweedFS"
+
+	id := uuid.NewString()
+	put, err := b.PutWithID(ctx, id, urlA, strings.NewReader(content))
+	if err != nil {
+		t.Fatalf("PutWithID: %v", err)
+	}
+	if put.ID != id {
+		t.Fatalf("put id = %q, want %q", put.ID, id)
+	}
+
+	// The caller-supplied id survives the real S3 metadata round-trip, so a
+	// rebuild recovers it exactly like a minted one.
+	var scanned *Entry
+	if err := b.Scan(ctx, func(e Entry) error {
+		if e.ID == id {
+			e := e
+			scanned = &e
+		}
+
+		return nil
+	}); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if scanned == nil {
+		t.Fatalf("scan did not recover id %q", id)
+	}
+	if scanned.DatasetURL != urlA || scanned.Size != int64(len(content)) {
+		t.Fatalf("scanned entry %+v, want dataset %q size %d", *scanned, urlA, len(content))
+	}
+}
+
 func TestS3IntegrationAtRestRoundTrip(t *testing.T) {
 	cfg := s3TestConfig(t)
 	b := newIntegrationBucket(t, cfg)

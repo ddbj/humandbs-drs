@@ -26,6 +26,9 @@ var (
 	ErrLocationOutsideRoot = errors.New("storage: location outside dataset roots")
 	// ErrInvalidRange reports a range read with a negative offset.
 	ErrInvalidRange = errors.New("storage: invalid range")
+	// ErrInvalidID reports a caller-supplied DRS id that does not follow the
+	// backend's object ID scheme (architecture.md § "object ID scheme").
+	ErrInvalidID = errors.New("storage: invalid object id")
 )
 
 // Entry is one object discovered by a scan: its canonical DRS id, the dataset it

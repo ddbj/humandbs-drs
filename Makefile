@@ -11,7 +11,7 @@ LDFLAGS := -X $(MODULE)/internal/buildinfo.Version=$(VERSION) \
 
 BIN := bin
 
-.PHONY: all build drs issuer test test-integration vet lint fmt tidy run-drs run-issuer clean
+.PHONY: all build drs issuer test test-integration test-e2e e2e-up e2e-down vet lint fmt tidy run-drs run-issuer clean
 
 all: build
 
@@ -31,6 +31,20 @@ test:
 test-integration: HUMANDBS_TEST_S3_ENDPOINT ?= http://localhost:8333
 test-integration:
 	HUMANDBS_TEST_S3_ENDPOINT=$(HUMANDBS_TEST_S3_ENDPOINT) go test -tags integration ./...
+
+# The end-to-end stack: the base compose topology plus the e2e fixtures and
+# the second drs instance from the override file.
+COMPOSE_E2E := docker compose -f compose.yaml -f test/e2e/compose.e2e.yaml
+
+e2e-up:
+	$(COMPOSE_E2E) up -d --build
+
+e2e-down:
+	$(COMPOSE_E2E) down -v
+
+# Runs the end-to-end tests against an already running stack (make e2e-up).
+test-e2e:
+	HUMANDBS_E2E=1 go test -tags e2e -count=1 ./test/e2e/
 
 vet:
 	go vet ./...

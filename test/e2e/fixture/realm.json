@@ -1,0 +1,33 @@
+{
+  "realm": "humandbs",
+  "enabled": true,
+  "clients": [
+    {
+      "clientId": "e2e-cli",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": false
+    }
+  ],
+  "users": [
+    {
+      "id": "11111111-1111-1111-1111-111111111111",
+      "username": "researcher",
+      "enabled": true,
+      "firstName": "Res",
+      "lastName": "Earcher",
+      "email": "researcher@example.org",
+      "emailVerified": true,
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "researcher-pw",
+          "temporary": false
+        }
+      ]
+    }
+  ]
+}

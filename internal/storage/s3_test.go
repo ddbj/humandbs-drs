@@ -81,6 +81,72 @@ func TestS3BackendPutBurnsMetadataAndScanRecoversID(t *testing.T) {
 	}
 }
 
+func TestS3BackendPutWithIDBurnsGivenID(t *testing.T) {
+	fake := newFakeS3()
+	b := newS3Backend(fake, s3Bucket, "objects/")
+	ctx := context.Background()
+
+	const id = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
+	entry, err := b.PutWithID(ctx, id, urlA, strings.NewReader("payload"))
+	if err != nil {
+		t.Fatalf("PutWithID: %v", err)
+	}
+	if entry.ID != id {
+		t.Fatalf("entry id = %q, want %q", entry.ID, id)
+	}
+	meta := fake.objects[entry.Location].metadata
+	if meta[metaKeyID] != id || meta[metaKeyDatasetURL] != urlA {
+		t.Fatalf("object metadata = %v, want id %q and dataset %q", meta, id, urlA)
+	}
+
+	// Scan recovers the caller-supplied id from metadata, same as a minted one.
+	got := collectScan(t, b)
+	e, ok := got[id]
+	if !ok {
+		t.Fatalf("scan did not recover id %q: %v", id, got)
+	}
+	if e.DatasetURL != urlA || e.Size != int64(len("payload")) {
+		t.Fatalf("scanned entry %+v, want dataset %q size %d", e, urlA, len("payload"))
+	}
+}
+
+func TestS3BackendPutWithIDRejectsNonCanonicalUUID(t *testing.T) {
+	fake := newFakeS3()
+	b := newS3Backend(fake, s3Bucket, "")
+	ctx := context.Background()
+
+	for _, id := range []string{
+		"",
+		"not-a-uuid",
+		"jgad000001-obj1",
+		"0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0", // uppercase: parses but is not canonical
+		"urn:uuid:0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",       // URN form: parses but is not canonical
+		"0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0 ",               // trailing space
+		"0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0-extra-trailing", // overlong
+	} {
+		if _, err := b.PutWithID(ctx, id, urlA, strings.NewReader("x")); !errors.Is(err, ErrInvalidID) {
+			t.Fatalf("PutWithID(%q) error = %v, want ErrInvalidID", id, err)
+		}
+	}
+	if len(fake.objects) != 0 {
+		t.Fatalf("rejected put stored objects: %v", fake.objects)
+	}
+}
+
+func TestS3BackendPutWithIDRejectsNonASCIIDataset(t *testing.T) {
+	fake := newFakeS3()
+	b := newS3Backend(fake, s3Bucket, "")
+
+	const id = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
+	_, err := b.PutWithID(context.Background(), id, "https://example.org/データ", strings.NewReader("x"))
+	if !errors.Is(err, ErrInvalidManifest) {
+		t.Fatalf("PutWithID error = %v, want ErrInvalidManifest", err)
+	}
+	if len(fake.objects) != 0 {
+		t.Fatalf("rejected put stored objects: %v", fake.objects)
+	}
+}
+
 func TestS3BackendUploadDownloadRoundTrip(t *testing.T) {
 	fake := newFakeS3()
 	b := newS3Backend(fake, s3Bucket, "objects/")
