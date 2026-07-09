@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -59,4 +60,17 @@ func Health(service, version string) http.HandlerFunc {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(body)
 	}
+}
+
+// BearerToken extracts the token of an RFC 6750 Authorization header, matching
+// the scheme case-insensitively (RFC 7235). The second result is false when no
+// well-formed Bearer credential is present.
+func BearerToken(r *http.Request) (string, bool) {
+	auth := r.Header.Get("Authorization")
+	const prefix = "Bearer "
+	if len(auth) <= len(prefix) || !strings.EqualFold(auth[:len(prefix)], prefix) {
+		return "", false
+	}
+
+	return auth[len(prefix):], true
 }

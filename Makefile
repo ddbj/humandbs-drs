@@ -11,7 +11,7 @@ LDFLAGS := -X $(MODULE)/internal/buildinfo.Version=$(VERSION) \
 
 BIN := bin
 
-.PHONY: all build drs issuer test test-integration test-e2e e2e-up e2e-down vet lint fmt tidy run-drs run-issuer clean
+.PHONY: all build drs issuer drs-encrypt drs-s3-ingest test test-integration test-e2e e2e-up e2e-down vet lint fmt tidy run-drs run-issuer clean
 
 all: build
 
@@ -22,6 +22,15 @@ drs:
 
 issuer:
 	go build -ldflags "$(LDFLAGS)" -o $(BIN)/issuer ./cmd/issuer
+
+# Auxiliary CLIs. drs-encrypt converts a plaintext file into the at-rest
+# envelope format; drs-s3-ingest uploads an object to the s3 backend and mints
+# its DRS ID. They are built on demand and are not part of `make build`.
+drs-encrypt:
+	go build -o $(BIN)/drs-encrypt ./cmd/drs-encrypt
+
+drs-s3-ingest:
+	go build -o $(BIN)/drs-s3-ingest ./cmd/drs-s3-ingest
 
 test:
 	go test ./...

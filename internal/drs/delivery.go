@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ddbj/humandbs-drs/internal/httpx"
 	"github.com/ddbj/humandbs-drs/internal/index"
 	"github.com/ddbj/humandbs-drs/internal/storage"
 	"github.com/ddbj/humandbs-drs/internal/token"
@@ -23,7 +24,7 @@ import (
 func (h *handler) serveData(w http.ResponseWriter, r *http.Request) {
 	objectID := r.PathValue("object_id")
 
-	tok, ok := bearerToken(r)
+	tok, ok := httpx.BearerToken(r)
 	if !ok {
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		writeError(w, http.StatusUnauthorized, "session token required")
@@ -151,7 +152,7 @@ func (h *handler) serveRevoke(w http.ResponseWriter, r *http.Request) {
 
 		return
 	}
-	tok, ok := bearerToken(r)
+	tok, ok := httpx.BearerToken(r)
 	if !ok || subtle.ConstantTimeCompare([]byte(tok), []byte(h.settings.AdminToken)) != 1 {
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		writeError(w, http.StatusUnauthorized, "admin authentication required")
@@ -329,18 +330,6 @@ func ifRangeMatches(r *http.Request, etag string, modTime time.Time) bool {
 	}
 
 	return t.Unix() == modTime.Unix()
-}
-
-// bearerToken extracts the token of an RFC 6750 Authorization header, matching
-// the scheme case-insensitively (RFC 7235).
-func bearerToken(r *http.Request) (string, bool) {
-	auth := r.Header.Get("Authorization")
-	const prefix = "Bearer "
-	if len(auth) <= len(prefix) || !strings.EqualFold(auth[:len(prefix)], prefix) {
-		return "", false
-	}
-
-	return auth[len(prefix):], true
 }
 
 // revokeBody is the POST /admin/revoke request body. An empty Dataset revokes all

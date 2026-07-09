@@ -77,7 +77,6 @@ type issuerEntry struct {
 type Clearinghouse struct {
 	issuers map[string]issuerEntry
 	clock   func() time.Time
-	leeway  time.Duration
 	logger  *slog.Logger
 }
 
@@ -89,14 +88,6 @@ type Option func(*Clearinghouse)
 func WithClock(now func() time.Time) Option {
 	return func(c *Clearinghouse) {
 		c.clock = now
-	}
-}
-
-// WithLeeway allows a symmetric tolerance on temporal claim checks, absorbing
-// clock skew between the issuers and this server.
-func WithLeeway(d time.Duration) Option {
-	return func(c *Clearinghouse) {
-		c.leeway = d
 	}
 }
 
@@ -119,7 +110,7 @@ func New(issuers []Issuer, opts ...Option) (*Clearinghouse, error) {
 		opt(c)
 	}
 
-	verifierOpts := []visa.VerifierOption{visa.WithLeeway(c.leeway)}
+	var verifierOpts []visa.VerifierOption
 	if c.clock != nil {
 		verifierOpts = append(verifierOpts, visa.WithClock(c.clock))
 	}

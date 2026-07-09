@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | humandbs-drs | Go binary `cmd/drs` | DRS 1.5 API、Passport Clearinghouse、storage backend、認可付き配信 |
 | humandbs-issuer | Go binary `cmd/issuer` | Visa の署名・発行、grant DB |
-| Keycloak | `quay.io/keycloak/keycloak:26` | identity provider（authN のみ） |
+| Keycloak | `quay.io/keycloak/keycloak:26.3.1` | identity provider（authN のみ） |
 | SeaweedFS | `chrislusf/seaweedfs:4.x` | s3 モードの実データ保管先 |
 
 ポート:
@@ -89,7 +89,7 @@ endpoint:
 | `GET /service-info` | `type.group=org.ga4gh`, `type.artifact=drs`, `type.version="1.5"` と `id` / `name` / `organization` / `version` |
 | `GET /objects/{id}` | DrsObject を返す。`expand` query に対応 |
 | `POST /objects/{id}` | 同上。body で `expand` と `passports` を受け取れる |
-| `OPTIONS /objects/{id}` | `Authorizations`（`supported_types:[PassportAuth]`, `passport_auth_issuers`）を返す |
+| `OPTIONS /objects/{id}` | `Authorizations`（`supported_types:[PassportAuth]`, `passport_auth_issuers`, `drs_object_id`）を返す |
 | `GET /objects/{id}/access/{access_id}` | AccessURL を返す |
 | `POST /objects/{id}/access/{access_id}` | 同上。body の `passports` で認可する |
 
@@ -183,7 +183,7 @@ request body（1 MiB）、`passports` の要素数、Passport あたりの Visa 
 
 - endpoint: `GET /permissions/{user}` が署名済み Passport JWT を `{"passport": "<JWT>"}` で、`GET /jwks` が公開鍵を返す。
 - 入力: Keycloak の access token を検証（`coreos/go-oidc`）して subject を確定する。
-- grant DB: `(subject, dataset_id, dac_source, asserted, expires, conditions)`。SQLite に admin API/seed で投入する。grant は `(subject, dataset_id)` で一意（再投入は上書き）、`expires` は NULL で無期限を表す。
+- grant DB: `(subject, dataset_id, dac_source, asserted, expires, conditions)`。SQLite に起動時 seed（seed file の読み込み）で投入する。grant は `(subject, dataset_id)` で一意（再投入は上書き）、`expires` は NULL で無期限を表す。運用中の投入・剥奪 HTTP API は本番の grant source 連携と併せて将来とする（requirements § PoC スコープ）。
 - Visa 組み立て（GA4GH 準拠）:
   - claim `ga4gh_visa_v1 = {type:"ControlledAccessGrants", value:<dataset resource URL>, source:<DAC URL>, by:"dac", asserted:<epoch>}`。
   - 標準 claim `iss`（issuer の public URL）, `sub`, `iat`, `exp`。
@@ -249,6 +249,6 @@ EncryptionProvider（どう暗号化するか）: 配信 handler は EncryptionP
 - 保持内容: `DRS ID` から、実データの所在（s3 key または FS path）、`size`、`sha-256`、所属 dataset（dataset resource URL）、`created_time` への対応。`size` と `sha-256` は EncryptionProvider が返す平文に対して計算する（DrsObject と配信の ETag は client が受け取る平文を指す。§3・§7）。加えて格納 byte 数（stored size）を保持し、配信時に EncryptionProvider へ渡す。`created_time` は再 scan で復元できる storage 側の事実に取り、filesystem モードでは file の mtime を用いる。
 - storage（S3/FS）を SSOT とし、index は破棄して再構築できる。DRS ID は「object ID scheme」に従い、s3 は object metadata から、filesystem は相対 path から決定論的に復元する。
 - object の所属 dataset（dataset resource URL）は取り込み時に確定する。s3 モードは object metadata か key prefix 規約に、filesystem モードは manifest の `(root, dataset resource URL)` 対応に持たせる。この対応も storage 側の規約（と manifest）に載るため、index を再構築できる。
-- 更新: s3 モードは SeaweedFS filer の `SubscribeMetadata` gRPC change feed もしくは定期 scan。filesystem モードは dir scan。再構築は現在の tree に対する全置換で、追加・削除が反映され、同一 tree なら同一 rows に収束する。
-- DRS server は起動時に storage を full scan して index を全置換する。derived cache のため毎起動で再構築してよい。
+- 再構築は現在の tree に対する全置換で、追加・削除が反映され、同一 tree なら同一 rows に収束する。DRS server は起動時に storage を full scan して index を全置換する。derived cache のため毎起動で再構築してよい。
+- 現状は起動時 full scan のみで、稼働中に storage へ加えた追加・削除を反映するには再起動する。運用中の増分更新（s3 モードの SeaweedFS filer `SubscribeMetadata` gRPC change feed もしくは定期 scan、filesystem モードの dir 再 scan）は将来拡張とする。
 - エンジンは SQLite（単一ファイル。derived なので durability は要求しない）。

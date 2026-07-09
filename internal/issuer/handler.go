@@ -4,7 +4,8 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"strings"
+
+	"github.com/ddbj/humandbs-drs/internal/httpx"
 )
 
 // passportResponse is the body of GET /permissions/{user}: the user's signed
@@ -52,7 +53,7 @@ func (h *handler) serveJWKS(w http.ResponseWriter, _ *http.Request) {
 // to be the {user} being asked about, and responds with the Passport minted
 // from the subject's active grants.
 func (h *handler) servePermissions(w http.ResponseWriter, r *http.Request) {
-	raw, ok := bearerToken(r)
+	raw, ok := httpx.BearerToken(r)
 	if !ok {
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		writeError(w, http.StatusUnauthorized, "missing bearer token")
@@ -89,18 +90,6 @@ func (h *handler) servePermissions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, passportResponse{Passport: passport})
-}
-
-// bearerToken extracts the token of an RFC 6750 Authorization header. The
-// scheme is matched case-insensitively per RFC 7235.
-func bearerToken(r *http.Request) (string, bool) {
-	auth := r.Header.Get("Authorization")
-	const prefix = "Bearer "
-	if len(auth) <= len(prefix) || !strings.EqualFold(auth[:len(prefix)], prefix) {
-		return "", false
-	}
-
-	return auth[len(prefix):], true
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

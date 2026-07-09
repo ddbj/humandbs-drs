@@ -10,6 +10,8 @@ GA4GH DRS と Passport/Visa による controlled-access data サービス。
 - Go の同一 module・別 binary で構成する。
   - `cmd/drs` — DRS 1.5 API、Passport Clearinghouse、storage backend、認可付き配信。
   - `cmd/issuer` — 自前の Visa Issuer。grant を管理し、GA4GH 準拠の Visa を署名して発行する。
+- 補助 CLI として `cmd/drs-s3-ingest`（s3 backend への object 取り込みと DRS ID 採番）と
+  `cmd/drs-encrypt`（filesystem at-rest 用に平文 file を envelope 形式へ変換）を同梱する。
 
 ## 構成
 
